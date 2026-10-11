@@ -146,7 +146,11 @@ def run_playtest(app: QApplication) -> int:
     def choose():
         target = None
         if url:
+            # Accept a catalogue entry or any bare stream URL.
             target = window.library.find(url)
+            if target is None and url.lower().startswith(("http://", "https://")):
+                target = {"id": "playtest", "name": url, "url": url, "codec": "",
+                          "bitrate": 0, "country": "", "genre": "varied", "zh": False}
         if target is None:
             for r in window.model.rows:
                 if (r.get("codec") or "").upper() == "MP3" and ".m3u8" not in r.get("url", "").lower():
