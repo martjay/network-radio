@@ -119,13 +119,22 @@ class Relay:
         self._upstream_ready = threading.Event()
         self._pump_bytes = 0
         self._marked = False
-        # The first bytes of the stream carry the container header (the Ogg BOS
-        # page, the ID3 tag, ...). ffmpeg cannot initialise a demuxer from
-        # mid-stream data alone, and the recorder is usually armed after
-        # playback has already consumed this, so a bounded prefix is kept and
-        # replayed to the recorder on attach.
+        # Bytes that have arrived but not yet been handed to a consumer. While
+        # no recorder is attached the pump holds the stream back instead of
+        # discarding it, so a recorder armed shortly after playback starts
+        # still receives the container header (Ogg BOS page, ID3 tag, ...).
+        # ffmpeg cannot initialise a container demuxer from mid-stream data,
+        # and replaying a stale copy later would break the Ogg timeline.
+        self._pending = bytearray()
+        self._pending_limit = 256 * 1024
+        # First bytes seen on the stream, kept for format identification once
+        # the backlog has been handed to a recorder.
         self._head = bytearray()
         self._head_limit = 8 * 1024
+        # True once the backlog has dropped its oldest bytes, which means the
+        # retained stream no longer begins at the header.
+        self._wrapped = False
+        self._drained = False
         # ~1.5 s of 320 kbps, the size of a typical server-side prebuffer
         self._mark_threshold = 60 * 1024
 
@@ -206,10 +215,45 @@ class Relay:
                     continue
                 idle = 0
                 self._upstream_ready.set()
-                if len(self._head) < self._head_limit:
-                    self._head += data
                 self._ring.write(data)
                 self._pump_bytes += len(data)
+                if len(self._head) < self._head_limit:
+                    self._head += data
+
+                recorder = self.recorder
+                if recorder is None:
+                    # Hold the stream back until a recorder attaches, so the
+                    # recording does not begin with silence.
+                    #
+                    # This must stay a *sliding* window: once full, the oldest
+                    # bytes are dropped so what remains is always contiguous
+                    # with the live data that follows. Simply refusing to
+                    # append would leave a gap between the retained prefix and
+                    # the resumed stream, and ffmpeg cannot reconcile that -
+                    # the decoder reports a corrupt frame part-way through.
+                    self._pending += data
+                    overflow = len(self._pending) - self._pending_limit
+                    if overflow > 0:
+                        del self._pending[:overflow]
+                        self._wrapped = True
+                else:
+                    # First write after attaching: prepend the backlog so the
+                    # recording covers everything since playback started.
+                    if not self._drained:
+                        self._drained = True
+                        backlog = self.drain_for_recorder(
+                            needs_header=getattr(recorder, "needs_stream_header", True)
+                        )
+                        if backlog:
+                            try:
+                                recorder.write(backlog)
+                            except Exception:  # noqa: BLE001
+                                pass
+                    try:
+                        recorder.write(data)
+                    except Exception:  # noqa: BLE001
+                        pass
+
                 if not self._marked and self._pump_bytes > self._mark_threshold:
                     # The opening burst has drained; start measuring real
                     # throughput from here so the reading reflects the stream
@@ -217,11 +261,6 @@ class Relay:
                     self._marked = True
                     if self.reader is not None:
                         self.reader.mark()
-                if self.recorder is not None:
-                    try:
-                        self.recorder.write(data)
-                    except Exception:  # noqa: BLE001
-                        pass
                 if self.reader is not None and self.reader.now_playing:
                     self.now_playing = self.reader.now_playing
         finally:
@@ -273,9 +312,37 @@ class Relay:
 
     @property
     def head_bytes(self) -> bytes:
-        """The leading bytes of the stream, used to identify its container."""
+        """The true start of the stream, for format identification.
+
+        This is always the first bytes received, never the sliding backlog:
+        once the backlog has wrapped, its start is somewhere in the middle of
+        the stream and would misidentify the container.
+        """
         with self._lock:
             return bytes(self._head)
+
+    def drain_for_recorder(self, needs_header: bool = True) -> bytes:
+        """Audio to hand a newly attached recorder.
+
+        Returns the pre-recording backlog. If the backlog has already wrapped
+        past the stream start and the caller says the format needs it, the
+        retained header is prepended so a container demuxer (Ogg) can
+        initialise.
+
+        `needs_header` must be False for raw frame streams (MP3, ADTS AAC):
+        those are self-synchronising, and replaying a prefix there duplicates
+        audio and desynchronises the frame boundaries.
+        """
+        with self._lock:
+            backlog = bytes(self._pending)
+            self._pending = bytearray()
+            if not backlog or not self._wrapped or not needs_header:
+                return backlog
+            prefix = bytes(self._head)
+            # Avoid duplicating if the backlog still happens to contain it.
+            if backlog.startswith(prefix[:32]):
+                return backlog
+            return prefix + backlog
 
     # ------------------------------------------------------------------ #
     #  HTTP handler

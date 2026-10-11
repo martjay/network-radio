@@ -22,9 +22,10 @@ PROXY = system_proxy()
 
 # One station per source format.
 CASES = [
-    ("Ogg/Opus  (the reported bug)", "https://listen.moe/kpop/stream", "mp3"),
-    ("MP3       (most common)", "https://ice5.somafm.com/reggae-256-mp3", "mp3"),
-    ("AAC       (via HLS/ffmpeg)", "https://ice1.somafm.com/groovesalad-128-mp3", "aac"),
+    ("Ogg/Opus  (container: needs priming)", "https://listen.moe/kpop/stream", "mp3"),
+    ("MP3       (raw frames: no priming)", "https://ice5.somafm.com/reggae-256-mp3", "mp3"),
+    ("MP3       (another, 128k)", "https://ice1.somafm.com/groovesalad-128-mp3", "aac"),
+    ("AAC/Opus  (mixed catalogue)", "https://listen.moe/stream", "mp3"),
 ]
 
 fails = []

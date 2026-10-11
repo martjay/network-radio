@@ -156,6 +156,43 @@ def main() -> int:
     _rec.source_url = "https://example.com/opus.stream"
     check("url hint 'opus' -> ogg", _rec._sniff(b"\x01\x02\x03\x04" + b"\x00" * 12), "ogg")
 
+    print("\nstream continuity")
+    # The relay keeps a sliding window of pre-recording audio. It must slide,
+    # not stop appending: a retained prefix that is not contiguous with the
+    # live stream leaves a gap, and the decoder then reports a corrupt frame
+    # part-way through the recording.
+    import inspect
+
+    from radio.relay import Relay
+
+    src = inspect.getsource(Relay._pump_loop)
+    check("backlog slides (drops oldest)", "del self._pending[:overflow]" in src, True)
+    check("backlog still bounded", "_pending_limit" in src, True)
+
+    print("\nheader replay policy")
+    # Container formats need the header page replayed; raw frame streams must
+    # not be, or audio is duplicated and frame alignment breaks.
+    _r = Recorder.__new__(Recorder)
+    _r.source = ""
+    check("unknown format defaults to needing header", _r.needs_stream_header, True)
+    for src_fmt, want in (("ogg", True), ("flac", True), ("mp3", False), ("aac", False)):
+        _r.source = src_fmt
+        check(f"{src_fmt}: needs header = {want}", _r.needs_stream_header, want)
+
+    _relay = Relay.__new__(Relay)
+    _relay._lock = __import__("threading").Lock()
+    _relay._pending = bytearray(b"LIVE" * 8)
+    _relay._head = b"HEADER"
+    _relay._wrapped = True
+    check("wrapped + needs  -> header prepended",
+          _relay.drain_for_recorder(True).startswith(b"HEADER"), True)
+    _relay._pending = bytearray(b"LIVE" * 8)
+    check("wrapped + no need -> backlog only",
+          _relay.drain_for_recorder(False).startswith(b"LIVE"), True)
+    _relay._pending = bytearray(b"HEADERLIVE")
+    check("not wrapped -> no duplication",
+          _relay.drain_for_recorder(True), b"HEADERLIVE")
+
     print()
     if FAILS:
         print(f"{len(FAILS)} FAILED: {', '.join(FAILS)}")

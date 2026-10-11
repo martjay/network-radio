@@ -148,7 +148,6 @@ class Recorder:
         self._tail = b""      # trailing partial frame held back between writes
         self._prepared = False
         self._header = b""    # stream header supplied for format detection
-        self._header_sent = False
 
     # ------------------------------------------------------------------ #
     def _build_cmd(self, fmt: str) -> list[str]:
@@ -189,6 +188,23 @@ class Recorder:
             cmd += ["-movflags", "+faststart"]
         cmd += ["-f", muxer, "-y", self.path]
         return cmd
+
+    @property
+    def needs_stream_header(self) -> bool:
+        """Whether the stream must begin at its header for this format.
+
+        Ogg and FLAC are container formats whose first page carries the codec
+        setup; a demuxer cannot start from the middle of them. MP3 and ADTS AAC
+        are self-synchronising frame streams, and prefixing them would duplicate
+        audio and break frame alignment.
+
+        Defaults to True before the format is known, which is the safe choice:
+        an unnecessary header only costs a little duplicated audio at the very
+        start, whereas a missing one makes the file unreadable.
+        """
+        if not self.source:
+            return True
+        return self.source in ("ogg", "flac")
 
     @staticmethod
     def source_format(fmt: str) -> str:
@@ -341,21 +357,11 @@ class Recorder:
         return tail[:last_end]
 
     def set_header(self, head: bytes) -> None:
-        """Supply the stream's leading bytes so the demuxer can initialise.
+        """Identify the stream format from its leading bytes.
 
-        The recorder is normally armed after playback has started, by which
-        time the container header has already passed through the relay. That
-        header is required twice over:
-
-          * to identify the container, so an Ogg/Opus station is not written
-            as an .mp3 file, and
-          * to prime ffmpeg, which cannot start an Ogg demuxer from
-            mid-stream data alone.
-
-        A bounded prefix is therefore replayed as the first input. It is kept
-        short deliberately: replaying too much duplicates audio that the live
-        pump then sends again, which makes ffmpeg reject the output for
-        non-monotonic timestamps.
+        Used only for detection and container selection; the bytes themselves
+        are not written, because the recorder starts mid-stream. The relay
+        ensures the recorder receives the header as part of its normal feed.
         """
         with self._lock:
             if not head or self._probed:
@@ -410,11 +416,6 @@ class Recorder:
                 except Exception as exc:  # noqa: BLE001
                     self.error = f"无法启动 ffmpeg: {exc}"
                     return
-                # Prime the demuxer with the stream header before the live
-                # data arrives, otherwise Ogg/Opus cannot be parsed at all.
-                if self._header and not self._header_sent:
-                    self._header_sent = True
-                    self._feed(self._header)
                 pending = self._align(bytes(self._first), fmt)
                 self._first.clear()
                 self._feed(pending)

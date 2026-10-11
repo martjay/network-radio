@@ -8,6 +8,8 @@ Options:
                         backend and catalogue, then exit with a status code
     --playtest [URL]    tune a station, confirm audio is decoded, print a
                         report and exit (used to validate packaged builds)
+    --rectest [URL]     record a few seconds and verify the file is playable
+                        (used to validate packaged builds)
 """
 from __future__ import annotations
 
@@ -229,6 +231,89 @@ def _configure_dpi() -> None:
     )
 
 
+def run_rectest(app: QApplication) -> int:
+    """Record a few seconds and confirm the result is a playable file.
+
+    This is the packaged-build check for recording: it exercises the bundled
+    ffmpeg, the container selection and the frame handling end to end.
+    """
+    import subprocess
+    import tempfile
+
+    from PySide6.QtCore import QTimer
+
+    from radio.recorder import ffmpeg_path
+
+    idx = sys.argv.index("--rectest")
+    url = sys.argv[idx + 1] if len(sys.argv) > idx + 1 and not sys.argv[idx + 1].startswith("-") else ""
+    out_dir = tempfile.mkdtemp(prefix="broadcast_rectest_")
+    state: dict = {"path": "", "error": "", "source": "", "container": ""}
+
+    window = MainWindow()
+    window.show()
+    window.library.set("recordings_dir", out_dir, save=False)
+    window.library.set("record_format", "mp3", save=False)   # deliberately MP3
+
+    def choose():
+        target = None
+        if url:
+            target = window.library.find(url)
+            if target is None and url.lower().startswith(("http://", "https://")):
+                target = {"id": "rt", "name": url, "url": url, "codec": "",
+                          "bitrate": 0, "country": "", "genre": "varied", "zh": False}
+        if target is None:
+            for r in window.model.rows:
+                if (r.get("codec") or "").upper() == "MP3":
+                    target = r
+                    break
+        if target is None:
+            state["error"] = "no station available"
+            return
+        print(f"  station: {target.get('name')}")
+        window.engine.tune(target)
+
+    def start():
+        if not window.engine.start_recording():
+            state["error"] = "start_recording returned False"
+            return
+        rec = window.engine._recorder
+        if rec is not None:
+            state["source"] = rec.source
+            state["container"] = rec.container
+        print(f"  source format: {state['source']}  container: {state['container']}")
+
+    def finish():
+        state["path"] = window.engine.stop_recording()
+        path = state["path"]
+        print(f"  file: {os.path.basename(path) if path else '(none)'}")
+        ok = False
+        if path and os.path.exists(path):
+            size = os.path.getsize(path)
+            print(f"  size: {size} bytes")
+            if size > 8000:
+                probe = subprocess.run(
+                    [ffmpeg_path(), "-hide_banner", "-v", "error", "-i", path,
+                     "-f", "null", "-"],
+                    capture_output=True, timeout=120,
+                )
+                err = probe.stderr.decode("utf-8", "replace").strip()
+                print(f"  decode: rc={probe.returncode} {err[:120] or '(clean)'}")
+                ok = probe.returncode == 0 and not err
+            else:
+                print("  file too small to be valid audio")
+        else:
+            print(f"  error: {state['error'] or 'no file produced'}")
+        print()
+        print("REC-TEST PASSED" if ok else "REC-TEST FAILED")
+        window.engine.stop()
+        app.exit(0 if ok else 1)
+
+    QTimer.singleShot(600, choose)
+    QTimer.singleShot(7000, start)
+    QTimer.singleShot(15000, finish)
+    return app.exec()
+
+
 def main() -> int:
     _configure_dpi()
     app = QApplication(sys.argv)
@@ -254,6 +339,9 @@ def main() -> int:
 
     if "--playtest" in sys.argv:
         return run_playtest(app)
+
+    if "--rectest" in sys.argv:
+        return run_rectest(app)
 
     window = MainWindow()
     window.show()

@@ -119,7 +119,7 @@ if not "%CODE%"=="0" (
 )
 
 echo.
-echo   [6/6] Playing a live station through the packaged decoder ...
+echo   [6/7] Playing a live station through the packaged decoder ...
 echo         ^(confirms the bundled FFmpeg backend really works^)
 echo.
 "%DIST%\Broadcast.exe" --playtest
@@ -129,7 +129,18 @@ if not "%CODE%"=="0" (
     echo   [WARNING] The play-test did not pass ^(code %CODE%^).
     echo             This usually means the network is unavailable or a proxy
     echo             is required, not that the build is broken.
-    echo             The executable is still in "%DIST%".
+    echo.
+)
+
+echo   [7/7] Recording a live station and verifying the file ...
+echo         ^(confirms the packaged recorder produces playable audio^)
+echo.
+"%DIST%\Broadcast.exe" --rectest
+set "CODE=%ERRORLEVEL%"
+if not "%CODE%"=="0" (
+    echo.
+    echo   [WARNING] The recording test did not pass ^(code %CODE%^).
+    echo             See the output above for the reason.
     echo.
 )
 

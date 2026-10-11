@@ -226,9 +226,9 @@ class PlayerEngine(QObject):
             relay = self._relay
             if relay is not None:
                 relay.recorder = rec
-        # Hand the recorder the container header captured at stream open, so
-        # it can identify the format even though it was armed mid-stream.
-        # Only used for detection - the header is not written to the file.
+        # Identify the container from the true stream start. The relay hands
+        # the recorder its backlog (and replays the header if it wrapped), so
+        # this is for format detection only.
         if relay is not None:
             head = relay.head_bytes
             if head:
