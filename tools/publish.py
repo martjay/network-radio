@@ -63,8 +63,10 @@ def api(method: str, path: str, tok: str, payload=None, raw: bytes | None = None
 def run(cmd: list[str], check: bool = True, secret: str = "") -> int:
     shown = [c.replace(secret, "***") if secret else c for c in cmd]
     print(f"  $ {' '.join(shown)}")
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    out = (p.stdout or "") + (p.stderr or "")
+    # git writes UTF-8, but a Windows console may default to a legacy code page.
+    # Decode explicitly so non-ASCII output cannot abort the push.
+    p = subprocess.run(cmd, capture_output=True)
+    out = (p.stdout or b"").decode("utf-8", "replace") + (p.stderr or b"").decode("utf-8", "replace")
     if secret:
         out = out.replace(secret, "***")
     for line in out.strip().splitlines()[-12:]:
