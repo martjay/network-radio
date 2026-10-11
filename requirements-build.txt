@@ -1,0 +1,3 @@
+# Build-time only dependencies. Installed by build_exe.bat.
+# Not needed to run the application from source.
+pyinstaller>=6.0

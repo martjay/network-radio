@@ -1,0 +1,27 @@
+# virtual environment and uv cache (created by run.bat)
+.venv/
+.uv-cache/
+
+# PyInstaller build output (created by build_exe.bat)
+build/
+dist/
+*.manifest
+
+# per-user data written at runtime (settings, favourites, history)
+userdata/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# scratch output
+tools/_testout/
+tools/_*.txt
+tools/_*.png
+*.log
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,10 @@
+# Runtime dependencies for BROADCAST.
+#
+# Installed automatically by run.bat into an isolated uv virtual environment.
+
+PySide6>=6.6,<7
+numpy>=1.24
+
+# Optional: only used if present. SOCKS5 is implemented natively in
+# radio/proxy.py, so this is not required for proxying.
+# PySocks>=1.7
