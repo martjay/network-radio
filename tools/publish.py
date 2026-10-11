@@ -60,10 +60,13 @@ def api(method: str, path: str, tok: str, payload=None, raw: bytes | None = None
         return 0, {"message": str(exc)}
 
 
-def run(cmd: list[str], check: bool = True) -> int:
-    print(f"  $ {' '.join(cmd)}")
+def run(cmd: list[str], check: bool = True, secret: str = "") -> int:
+    shown = [c.replace(secret, "***") if secret else c for c in cmd]
+    print(f"  $ {' '.join(shown)}")
     p = subprocess.run(cmd, capture_output=True, text=True)
     out = (p.stdout or "") + (p.stderr or "")
+    if secret:
+        out = out.replace(secret, "***")
     for line in out.strip().splitlines()[-12:]:
         print(f"      {line}")
     if check and p.returncode != 0:
@@ -74,9 +77,10 @@ def run(cmd: list[str], check: bool = True) -> int:
 def push(tok: str) -> None:
     print("\n=== pushing to GitHub ===")
     url = f"https://x-access-token:{tok}@github.com/{OWNER}/{REPO}.git"
-    # The token goes into a one-shot remote, never into .git/config.
-    run(["git", "push", url, "main:main", "--force"])
-    run(["git", "push", url, "--tags"], check=False)
+    # The token goes into a one-shot remote, never into .git/config, and is
+    # redacted from all command output.
+    run(["git", "push", url, "main:main", "--force"], secret=tok)
+    run(["git", "push", url, "--tags"], check=False, secret=tok)
     print("  pushed.")
 
 
