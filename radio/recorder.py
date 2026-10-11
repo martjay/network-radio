@@ -19,6 +19,10 @@ import time
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
+# Leading bytes buffered before the stream format is identified. The Ogg and
+# MP4 headers are longer than a bare MPEG frame, so this must be generous.
+_SNIFF_BYTES = 8192
+
 
 def ffmpeg_path() -> str | None:
     """Locate ffmpeg: explicit setting, bundled copy, then PATH."""
@@ -51,6 +55,36 @@ CONTAINERS = {
     "wav": ("wav", "wav", "pcm_s16le"),
     "ogg": ("ogg", "ogg", "libvorbis"),
     "flac": ("flac", "flac", "flac"),
+}
+
+# Which *source* stream formats can be copied bit-for-bit into each container.
+# Anything not listed must be re-encoded, otherwise ffmpeg refuses to write the
+# header ("Exactly one MP3 audio stream is required") and leaves a 0-byte or
+# unplayable file. About a quarter of the catalogue is AAC/Opus/Vorbis, so this
+# matters for far more than one station.
+COPY_COMPATIBLE = {
+    "mp3": {"mp3"},
+    "aac": {"aac"},
+    "m4a": {"aac", "mp3"},
+    "ogg": {"ogg"},
+    "flac": {"flac"},
+    "wav": set(),          # WAV always needs PCM
+}
+
+# Encoder used when the source cannot be copied into the chosen container.
+TRANSCODE_ENCODER = {
+    "mp3": "libmp3lame",
+    "aac": "aac",
+    "m4a": "aac",
+    "ogg": "libvorbis",
+    "flac": "flac",
+    "wav": "pcm_s16le",
+}
+
+# Human-readable source format names, for the report shown in the UI.
+FORMAT_LABELS = {
+    "mp3": "MP3", "aac": "AAC", "ogg": "Ogg (Opus/Vorbis)",
+    "flac": "FLAC", "unknown": "未知",
 }
 
 RECORD_FORMATS = [
@@ -89,6 +123,7 @@ class Recorder:
         title: str = "",
         bitrate_kbps: int = 192,
         container: str = "mp3",
+        auto_container: bool = False,
     ):
         self.directory = directory
         self.filename = filename
@@ -96,6 +131,10 @@ class Recorder:
         self.title = title
         self.bitrate_kbps = max(64, min(320, int(bitrate_kbps or 192)))
         self.container = container if container in CONTAINERS else "mp3"
+        self.requested_container = self.container
+        self.auto_container = bool(auto_container)
+        self.source = ""
+        self.transcoded = False
         self.path = os.path.join(directory, filename)
         self.started_at = 0.0
         self.bytes_in = 0
@@ -107,11 +146,14 @@ class Recorder:
         self._probed = False
         self._fmt = ""
         self._tail = b""      # trailing partial frame held back between writes
+        self._prepared = False
+        self._header = b""    # stream header supplied for format detection
+        self._header_sent = False
 
     # ------------------------------------------------------------------ #
     def _build_cmd(self, fmt: str) -> list[str]:
         exe = ffmpeg_path() or "ffmpeg"
-        ext, muxer, codec = CONTAINERS[self.container]
+        _ext, muxer, _codec = CONTAINERS[self.container]
         cmd = [
             exe, "-hide_banner", "-loglevel", "error", "-nostdin",
             "-f", fmt,
@@ -122,36 +164,83 @@ class Recorder:
             "-metadata", f"comment=Recorded from {self.source_url}",
             "-metadata", f"date={time.strftime('%Y-%m-%d')}",
         ]
-        if codec == "copy":
+
+        source = self.source_format(fmt)
+        can_copy = source in COPY_COMPATIBLE.get(self.container, set())
+        if can_copy:
             cmd += ["-c:a", "copy"]
-        elif codec == "aac":
-            cmd += ["-c:a", "aac", "-b:a", f"{self.bitrate_kbps}k"]
-        elif codec == "pcm_s16le":
-            cmd += ["-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2"]
-        elif codec == "libvorbis":
-            cmd += ["-c:a", "libvorbis", "-q:a", "5"]
-        elif codec == "flac":
-            cmd += ["-c:a", "flac", "-compression_level", "5"]
+        else:
+            # The source cannot live in this container; encode it.
+            encoder = TRANSCODE_ENCODER[self.container]
+            if encoder in ("aac",):
+                cmd += ["-c:a", "aac", "-b:a", f"{self.bitrate_kbps}k"]
+            elif encoder == "libvorbis":
+                # Vorbis ignores -b:a in favour of a quality scale; 5 ~ 160 kbps.
+                cmd += ["-c:a", "libvorbis", "-q:a", "5"]
+            elif encoder == "flac":
+                cmd += ["-c:a", "flac", "-compression_level", "5"]
+            elif encoder == "pcm_s16le":
+                cmd += ["-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2"]
+            else:
+                cmd += ["-c:a", encoder, "-b:a", f"{self.bitrate_kbps}k"]
+            self.transcoded = True
+
         if muxer == "mp4":
             cmd += ["-movflags", "+faststart"]
         cmd += ["-f", muxer, "-y", self.path]
         return cmd
 
+    @staticmethod
+    def source_format(fmt: str) -> str:
+        """Normalise a detected demuxer name to a source-format key."""
+        if fmt in ("mp3", "aac", "ogg", "flac"):
+            return fmt
+        if fmt == "vorbis":
+            return "ogg"
+        if fmt == "opus":
+            return "ogg"
+        return fmt or "unknown"
+
+    @staticmethod
+    def best_container(source: str, requested: str) -> str:
+        """Pick a container that can hold `source` losslessly if possible.
+
+        Used when the user has not expressed a preference: copying the stream
+        keeps the audio bit-identical to the broadcast.
+        """
+        if requested and source in COPY_COMPATIBLE.get(requested, set()):
+            return requested
+        for candidate in ("mp3", "aac", "ogg", "flac", "m4a"):
+            if source in COPY_COMPATIBLE.get(candidate, set()):
+                return candidate
+        return requested or "mp3"
+
     def _sniff(self, data: bytes) -> str:
         """Decide the demuxer from the first bytes of the stream."""
-        head = bytes(self._first[:16])
+        head = bytes(data[:16])
         if head.startswith(b"ID3"):
             return "mp3"
+        if head.startswith(b"OggS"):
+            return "ogg"
+        if head.startswith(b"fLaC"):
+            return "flac"
         if head.startswith(b"\xff\xf1") or head.startswith(b"\xff\xf9"):
             return "aac"
         if head[:2] == b"\xff\xfb" or head[:2] == b"\xff\xfa" or head[:2] == b"\xff\xf3":
             return "mp3"
-        if head.startswith(b"OggS"):
-            return "ogg"
         if head.startswith(b"ADIF"):
             return "aac"
-        # fall back on the declared source type
-        return "aac" if "aac" in (self.source_url or "").lower() else "mp3"
+        if head[:4] == b"RIFF" and bytes(data[8:12]) == b"WAVE":
+            return "wav"
+        # Unknown: fall back to the declared source URL.
+        low = (self.source_url or "").lower()
+        if "opus" in low or "ogg" in low or "vorbis" in low:
+            return "ogg"
+        if "flac" in low:
+            return "flac"
+        if "aac" in low:
+            return "aac"
+        return "mp3"
 
     @staticmethod
     def _align(data: bytes, fmt: str) -> bytes:
@@ -189,6 +278,19 @@ class Recorder:
             raise RuntimeError("未找到 ffmpeg，请安装后重试（录制功能需要 ffmpeg）")
         os.makedirs(self.directory, exist_ok=True)
         self.started_at = time.time()
+
+    def prepare(self, first_bytes: bytes) -> None:
+        """Choose the real container from the stream, then fix the file name.
+
+        Called as soon as the first bytes arrive. Without this, an Ogg/Opus
+        station would be muxed into an .mp3 file and ffmpeg would refuse to
+        write the header, leaving an unplayable recording.
+        """
+        if self._prepared:
+            return
+        self._prepared = True
+        self.source = self.source_format(self._sniff(first_bytes))
+        self._choose_container()
 
     @staticmethod
     def _frame_length(data: bytes, i: int) -> int:
@@ -238,6 +340,40 @@ class Recorder:
         # an incomplete frame, so cut back to the last complete one.
         return tail[:last_end]
 
+    def set_header(self, head: bytes) -> None:
+        """Supply the stream's leading bytes so the demuxer can initialise.
+
+        The recorder is normally armed after playback has started, by which
+        time the container header has already passed through the relay. That
+        header is required twice over:
+
+          * to identify the container, so an Ogg/Opus station is not written
+            as an .mp3 file, and
+          * to prime ffmpeg, which cannot start an Ogg demuxer from
+            mid-stream data alone.
+
+        A bounded prefix is therefore replayed as the first input. It is kept
+        short deliberately: replaying too much duplicates audio that the live
+        pump then sends again, which makes ffmpeg reject the output for
+        non-monotonic timestamps.
+        """
+        with self._lock:
+            if not head or self._probed:
+                return
+            self._header = bytes(head)
+            self.source = self.source_format(self._sniff(self._header))
+            self._choose_container()
+
+    def _choose_container(self) -> None:
+        """Pick the real container from `self.source` and update the path."""
+        chosen = self.best_container(self.source, self.requested_container) \
+            if self.auto_container else self.requested_container
+        if chosen == self.container:
+            return
+        self.container = chosen
+        base, _old = os.path.splitext(self.path)
+        self.path = f"{base}.{CONTAINERS[chosen][0]}"
+
     def write(self, data: bytes) -> None:
         """Feed live audio bytes. Called from the relay pump thread."""
         if not data:
@@ -245,14 +381,22 @@ class Recorder:
         with self._lock:
             self.bytes_in += len(data)
             if self._proc is None:
-                if len(self._first) < 4096:
+                # Accumulate enough leading bytes to identify the format. This
+                # must append until the threshold is met regardless of how big
+                # the incoming chunk is - a large first chunk previously left
+                # the buffer empty, so the format was guessed from the URL and
+                # an Opus stream was written as .mp3.
+                if len(self._first) < _SNIFF_BYTES:
                     self._first += data
-                    if len(self._first) < 2048:
+                    if len(self._first) < _SNIFF_BYTES:
                         return
                 if self._probed:
                     return
                 self._probed = True
-                fmt = self._sniff(data)
+                # Prefer the retained stream header; fall back to what we got.
+                head = self._header or bytes(self._first)
+                self.prepare(head)
+                fmt = self._sniff(head)
                 self._fmt = fmt
                 cmd = self._build_cmd(fmt)
                 try:
@@ -266,6 +410,11 @@ class Recorder:
                 except Exception as exc:  # noqa: BLE001
                     self.error = f"无法启动 ffmpeg: {exc}"
                     return
+                # Prime the demuxer with the stream header before the live
+                # data arrives, otherwise Ogg/Opus cannot be parsed at all.
+                if self._header and not self._header_sent:
+                    self._header_sent = True
+                    self._feed(self._header)
                 pending = self._align(bytes(self._first), fmt)
                 self._first.clear()
                 self._feed(pending)

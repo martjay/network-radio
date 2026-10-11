@@ -20,7 +20,7 @@ os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.*=false;qt.qpa.*=false"
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from radio import paths, theme  # noqa: E402
+from radio import appicon, paths, theme  # noqa: E402
 from radio.main_window import MainWindow  # noqa: E402
 
 
@@ -106,6 +106,40 @@ def run_selftest(app: QApplication) -> int:
 
     check("theme + icons", check_theme)
 
+    def check_app_icon():
+        from radio import appicon
+        ic = appicon.app_icon()
+        if ic.isNull():
+            raise RuntimeError("application icon is null")
+        sizes = len(ic.availableSizes())
+        if sizes < 8:
+            raise ValueError(f"only {sizes} icon sizes")
+        ico = paths.bundled("broadcast.ico")
+        have = "ico bundled" if os.path.isfile(ico) else "ico missing"
+        return f"{sizes} sizes, {have}"
+
+    check("application icon", check_app_icon)
+
+    def check_tray():
+        from PySide6.QtWidgets import QSystemTrayIcon
+        from radio import appicon
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return "no system tray on this desktop (tray disabled)"
+        icon = appicon.tray_icon()
+        if icon.isNull():
+            raise RuntimeError("tray icon is null")
+        return f"tray available, {len(icon.availableSizes())} sizes"
+
+    check("system tray", check_tray)
+
+    def check_dpi():
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        return (f"{screen.logicalDotsPerInch():.0f} dpi, "
+                f"scale {screen.devicePixelRatio():.2f}x")
+
+    check("high-DPI scaling", check_dpi)
+
     print()
     if failures:
         print(f"SELF-TEST FAILED: {len(failures)} check(s): {', '.join(failures)}")
@@ -180,16 +214,34 @@ def run_playtest(app: QApplication) -> int:
     return app.exec()
 
 
-def main() -> int:
+def _configure_dpi() -> None:
+    """Set up high-DPI handling before the QApplication exists.
+
+    Qt 6 always scales for high-DPI displays, so the deprecated
+    AA_EnableHighDpiScaling / AA_UseHighDpiPixmaps switches are not set (they
+    only produce warnings). What still matters is the rounding policy:
+    `PassThrough` honours fractional scale factors (125%, 150%) exactly, so
+    the hand-painted interface is rendered at the true scale rather than being
+    resampled to a neighbouring integer factor.
+    """
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
+
+
+def main() -> int:
+    _configure_dpi()
     app = QApplication(sys.argv)
     app.setApplicationName(paths.APP_NAME)
     app.setApplicationDisplayName(paths.APP_TITLE)
     app.setApplicationVersion(paths.APP_VERSION)
     app.setOrganizationName(paths.APP_NAME)
     app.setStyle("Fusion")
+
+    # Own taskbar identity and window icon, so the shell shows the product's
+    # icon rather than the generic interpreter one (notably when frozen).
+    appicon.set_taskbar_identity()
+    app.setWindowIcon(appicon.app_icon())
 
     # The theme module resolves font families lazily; force it now that the
     # platform font database exists.

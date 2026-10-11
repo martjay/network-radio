@@ -11,18 +11,58 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QSizeGrip, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from . import icons, paths, theme
+from . import appicon, icons, paths, theme
 from .dialogs import (
     ExportDialog, PreferencesDialog, ReportDialog, StationDialog, confirm, info,
 )
 from .library import SORT_MODES, Library
 from .player import PlayerEngine
 from .table import GENRE_ZH, StationModel, StationTable
+from .tray import TrayController
 from .widgets import (
     ArtTile, Chip, ElideLabel, IconButton, KeyValueRow, LevelMeter, NavItem,
     PlayingIndicator, SearchField, SpectrumWidget, StatRow, TextButton, TransportButton,
     VolumeControl, hline, section_label, vline,
 )
+
+
+def _ensure_dir(path: str) -> bool:
+    """Create `path` if needed and confirm it is writable."""
+    if not path:
+        return False
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".write-probe")
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("ok")
+        os.remove(probe)
+        return True
+    except (OSError, PermissionError):
+        return False
+
+
+def _reveal_in_file_manager(path: str) -> bool:
+    """Open `path` in the desktop file manager. Returns True on success."""
+    import subprocess
+    import sys as _sys
+
+    try:
+        if _sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606
+            return True
+        if _sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+            return True
+        subprocess.Popen(["xdg-open", path])
+        return True
+    except Exception:  # noqa: BLE001
+        # Fall back to Qt's own handler.
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        try:
+            return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
+        except Exception:  # noqa: BLE001
+            return False
 
 
 class MiniBar(QWidget):
@@ -68,9 +108,13 @@ class MainWindow(QWidget):
         self._resize_edge = None
         self._resize_origin = None
         self._record_started = 0.0
+        self._really_quit = False
+        self._tray_hint_shown = False
+        self.tray: TrayController | None = None
 
         self._build()
         self._wire()
+        self._build_tray()
         self._restore_geometry()
 
         self._apply_filters(select_last=True)
@@ -772,6 +816,7 @@ class MainWindow(QWidget):
             "playing": "播放中", "error": "播放错误",
         }
         self._status_text.setText(labels.get(state, state))
+        self._sync_tray()
         obj = "StatusTextLive" if state == "playing" else "StatusText"
         self._status_text.setObjectName(obj)
         self._status_text.setStyleSheet(
@@ -838,6 +883,7 @@ class MainWindow(QWidget):
         self._mini_track.setText(title)
         self._np_track.setText(title)
         self.titlebar.set_now_playing(title, self.engine.state == "playing")
+        self._sync_tray()
 
     def _on_icy_name(self, name: str) -> None:
         if name and not self._mini_track.fullText():
@@ -907,12 +953,34 @@ class MainWindow(QWidget):
             from PySide6.QtCore import QUrl
             QDesktopServices.openUrl(QUrl(station["homepage"]))
 
+    def _recordings_dir(self) -> str:
+        """The directory recordings go to, resolved and guaranteed to exist.
+
+        Falls back to a writable location when the preferred one cannot be
+        created, so a locked-down or missing Music folder never leaves the
+        user with a dead button and no explanation.
+        """
+        wanted = self.library.get("recordings_dir") or paths.default_recordings_dir()
+        if _ensure_dir(wanted):
+            return wanted
+        fallback = os.path.join(paths.app_dir(), "recordings")
+        if _ensure_dir(fallback):
+            self.library.set("recordings_dir", fallback, save=False)
+            self._status_text.setText(f"原录音目录不可写，已改用 {fallback}")
+            return fallback
+        return wanted
+
     def _open_recordings(self) -> None:
-        from PySide6.QtGui import QDesktopServices
-        from PySide6.QtCore import QUrl
-        path = self.library.get("recordings_dir") or paths.default_recordings_dir()
-        os.makedirs(path, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        path = self._recordings_dir()
+        if not os.path.isdir(path):
+            self._status_text.setText(f"无法创建录音目录：{path}")
+            return
+        if _reveal_in_file_manager(path):
+            self._status_text.setText(f"已打开 {path}")
+        else:
+            # Last resort: tell the user where it is and copy the path.
+            QApplication.clipboard().setText(path)
+            self._status_text.setText(f"无法打开文件管理器，路径已复制：{path}")
 
     def _open_report(self) -> None:
         station = self._current_station()
@@ -986,6 +1054,7 @@ class MainWindow(QWidget):
         self._btn_rec.setChecked(active)
         self._rec_button.setChecked(active)
         self._rec_button.setText("停止录制" if active else "开始录制")
+        self._sync_tray()
         if active:
             name = os.path.basename(path) if path else ""
             self._rec_status.setText(f"录制中 · {name}")
@@ -1142,40 +1211,143 @@ class MainWindow(QWidget):
         if event.type() == event.Type.WindowStateChange:
             self.titlebar.set_maximized(self.isMaximized())
 
+    # ================================================================== #
+    #  tray
+    # ================================================================== #
+    def _build_tray(self) -> None:
+        self.setWindowIcon(appicon.app_icon())
+        self.tray = TrayController(self, paths.APP_TITLE)
+        if not self.tray.available:
+            return
+        self.tray.show_requested.connect(self._restore_from_tray)
+        self.tray.quit_requested.connect(self._quit_from_tray)
+        self.tray.play_pause_requested.connect(self._on_play_clicked)
+        self.tray.stop_requested.connect(self._on_stop_clicked)
+        self.tray.next_requested.connect(lambda: self._step(1))
+        self.tray.previous_requested.connect(lambda: self._step(-1))
+        self.tray.record_requested.connect(self._toggle_record)
+        self.tray.favorites_requested.connect(self._toggle_favorite_current)
+        self.tray.set_state(False, False, False)
+        self.tray.show()
+
+    def _restore_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self) -> None:
+        self._really_quit = True
+        self.close()
+
+    def _sync_tray(self) -> None:
+        if self.tray is None or not self.tray.available:
+            return
+        playing = self.engine.state == "playing"
+        station = self.engine.station.get("name", "")
+        track = self._mini_track.fullText()
+        self.tray.set_playing(station, track, playing)
+        url = self.engine.station.get("url", "")
+        self.tray.set_state(playing, self.engine.is_recording,
+                            self.library.is_favorite(url) if url else False)
+
+    # ================================================================== #
+    #  window geometry / DPI
+    # ================================================================== #
     def _restore_geometry(self) -> None:
-        geo = self.library.get("window_geometry", "")
+        """Restore the saved size, clamped to the screen it will appear on.
+
+        Coordinates are stored in logical pixels, so they stay meaningful when
+        the display scale changes between sessions (a window saved on a 150%
+        display is still usable on a 100% one).
+        """
+        screen = self._target_screen()
+        avail = screen.availableGeometry() if screen else None
+
+        if self.library.get("window_maximized", False):
+            self.showMaximized()
+            self.titlebar.set_maximized(True)
+            return
+
         restored = False
-        if geo:
-            parts = geo.split(",")
-            if len(parts) == 4:
-                try:
-                    x, y, w, h = (int(p) for p in parts)
-                    screens = QGuiApplication.screens()
-                    if any(s.availableGeometry().intersects(
-                            self.frameGeometry().adjusted(0, 0, 0, 0).translated(x, y))
-                            for s in screens):
-                        self.setGeometry(x, y, max(1180, w), max(700, h))
-                        restored = True
-                except ValueError:
-                    restored = False
+        geo = self.library.get("window_geometry", "")
+        parts = str(geo).split(",") if geo else []
+        if len(parts) == 4:
+            try:
+                x, y, w, h = (int(p) for p in parts)
+                if avail is not None:
+                    # Clamp size, then nudge the window fully back on screen if
+                    # the display layout changed (unplugged monitor, etc.).
+                    w = max(self.minimumWidth(), min(w, avail.width()))
+                    h = max(self.minimumHeight(), min(h, avail.height()))
+                    x = max(avail.left(), min(x, avail.right() - w))
+                    y = max(avail.top(), min(y, avail.bottom() - h))
+                self.setGeometry(x, y, w, h)
+                restored = True
+            except (TypeError, ValueError):
+                restored = False
+
         if not restored:
-            screen = QGuiApplication.primaryScreen().availableGeometry()
-            w = min(1560, int(screen.width() * 0.86))
-            h = min(940, int(screen.height() * 0.88))
-            self.resize(w, h)
-            self.move(screen.center().x() - w // 2, screen.center().y() - h // 2)
+            self._center_default(avail)
+
+    def _target_screen(self):
+        geo = self.library.get("window_geometry", "")
+        parts = str(geo).split(",") if geo else []
+        if len(parts) == 4:
+            try:
+                x, y = int(parts[0]), int(parts[1])
+                from PySide6.QtCore import QRect
+                probe = QRect(x, y, 200, 200)
+                for s in QGuiApplication.screens():
+                    if s.availableGeometry().intersects(probe):
+                        return s
+            except (TypeError, ValueError):
+                pass
+        return QGuiApplication.primaryScreen()
+
+    def _center_default(self, avail) -> None:
+        if avail is None:
+            self.resize(1400, 880)
+            return
+        # Size to the screen rather than a fixed pixel count, so a 4K display
+        # does not open a small window and a laptop does not get one too big.
+        w = min(int(avail.width() * 0.86), 1680)
+        h = min(int(avail.height() * 0.88), 1000)
+        w = max(self.minimumWidth(), w)
+        h = max(self.minimumHeight(), h)
+        self.resize(w, h)
+        self.move(avail.center().x() - w // 2, avail.center().y() - h // 2)
+
+    def _save_geometry(self) -> None:
+        rect = self.normalGeometry() if self.isMaximized() else self.geometry()
+        self.library.set("window_maximized", self.isMaximized(), save=False)
+        if not self.isMinimized():
+            self.library.set(
+                "window_geometry",
+                f"{rect.x()},{rect.y()},{rect.width()},{rect.height()}",
+                save=False,
+            )
 
     def closeEvent(self, event):  # noqa: N802
-        rect = self.normalGeometry() if self.isMaximized() else self.geometry()
-        self.library.set(
-            "window_geometry",
-            f"{rect.x()},{rect.y()},{rect.width()},{rect.height()}",
-            save=False,
-        )
+        """Hide to the tray instead of quitting, unless quitting for real."""
+        self._save_geometry()
+        want_tray = (self.tray is not None and self.tray.available
+                     and not self._really_quit
+                     and bool(self.library.get("close_to_tray", True)))
+        if want_tray:
+            event.ignore()
+            self.hide()
+            if (not self._tray_hint_shown
+                    and self.library.get("tray_notifications", True)):
+                self._tray_hint_shown = True
+                self.tray.notify(paths.APP_TITLE,
+                                 "已最小化到托盘，播放继续。右键托盘图标可操作。")
+            return
         if self.engine.is_recording:
             self.engine.stop_recording()
         self.engine.stop()
         self.library.save()
+        if self.tray is not None:
+            self.tray.hide()
         super().closeEvent(event)
 
     # -- frameless resize --------------------------------------------------

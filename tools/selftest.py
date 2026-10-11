@@ -128,6 +128,34 @@ def main() -> int:
     check("non-mp3 untouched",
           Recorder._trim_partial_frame(b"\x00" * 10, "aac"), b"\x00" * 10)
 
+    print("\ncontainer / source compatibility")
+    from radio.recorder import COPY_COMPATIBLE, Recorder
+
+    check("mp3 source into mp3 is a copy", "mp3" in COPY_COMPATIBLE["mp3"], True)
+    check("ogg source cannot go into mp3", "ogg" in COPY_COMPATIBLE["mp3"], False)
+    check("aac source cannot go into mp3", "aac" in COPY_COMPATIBLE["mp3"], False)
+    # The reported bug: an Ogg/Opus station must not be written as .mp3.
+    check("opus auto-selects ogg", Recorder.best_container("ogg", "mp3"), "ogg")
+    check("aac auto-selects aac", Recorder.best_container("aac", "mp3"), "aac")
+    check("mp3 keeps requested mp3", Recorder.best_container("mp3", "mp3"), "mp3")
+    check("flac keeps requested flac", Recorder.best_container("flac", "flac"), "flac")
+    check("wav forces transcode", COPY_COMPATIBLE["wav"], set())
+    check("source_format maps opus->ogg", Recorder.source_format("opus"), "ogg")
+    check("source_format maps vorbis->ogg", Recorder.source_format("vorbis"), "ogg")
+
+    print("\nstream sniffing")
+    _rec = Recorder.__new__(Recorder)
+    _rec.source_url = ""
+    check("OggS header -> ogg", _rec._sniff(b"OggS\x00\x02\x00\x00" + b"\x00" * 8), "ogg")
+    check("ID3 header -> mp3", _rec._sniff(b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 6), "mp3")
+    check("fLaC header -> flac", _rec._sniff(b"fLaC\x00\x00\x00\x22" + b"\x00" * 8), "flac")
+    check("ADTS header -> aac", _rec._sniff(b"\xff\xf1\x50\x80\x00\x1f" + b"\x00" * 10), "aac")
+    check("MPEG frame -> mp3", _rec._sniff(b"\xff\xfb\x90\x00" + b"\x00" * 12), "mp3")
+    _rec.source_url = "https://listen.moe/kpop/stream"
+    check("unknown bytes falls back to url", _rec._sniff(b"\x01\x02\x03\x04" + b"\x00" * 12), "mp3")
+    _rec.source_url = "https://example.com/opus.stream"
+    check("url hint 'opus' -> ogg", _rec._sniff(b"\x01\x02\x03\x04" + b"\x00" * 12), "ogg")
+
     print()
     if FAILS:
         print(f"{len(FAILS)} FAILED: {', '.join(FAILS)}")

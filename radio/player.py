@@ -93,6 +93,7 @@ class PlayerEngine(QObject):
 
         self._recorder: Recorder | None = None
         self._recording = False
+        self._rec_path = ""
 
         self._window = np.hanning(self.FFT).astype(np.float32)
         self._prev_bands = np.zeros(self.BANDS, dtype=np.float32)
@@ -211,15 +212,30 @@ class PlayerEngine(QObject):
                 title=self.station.get("name", ""),
                 bitrate_kbps=kbps,
                 container=fmt,
+                # Let the recorder match the container to the real stream
+                # format; otherwise AAC/Opus stations cannot be written.
+                auto_container=True,
             )
             rec.start()
         except Exception as exc:  # noqa: BLE001
             self.error_occurred.emit(f"无法开始录制：{exc}")
             return False
         self._recorder = rec
+        self._rec_path = rec.path
         with self._relay_lock:
-            if self._relay is not None:
-                self._relay.recorder = rec
+            relay = self._relay
+            if relay is not None:
+                relay.recorder = rec
+        # Hand the recorder the container header captured at stream open, so
+        # it can identify the format even though it was armed mid-stream.
+        # Only used for detection - the header is not written to the file.
+        if relay is not None:
+            head = relay.head_bytes
+            if head:
+                try:
+                    rec.set_header(head)
+                except Exception:  # noqa: BLE001
+                    pass
         self._recording = True
         self.recording_changed.emit(True, rec.path)
         return True
@@ -230,10 +246,17 @@ class PlayerEngine(QObject):
             if self._relay is not None:
                 self._relay.recorder = None
         self._recording = False
+        self._rec_path = ""
         if rec is None:
             self.recording_changed.emit(False, "")
             return ""
         path = rec.stop()
+        if not path:
+            # Nothing usable was written; surface why instead of reporting a
+            # saved file that does not exist.
+            self.error_occurred.emit(rec.error or "录制失败：没有写入任何音频数据")
+            self.recording_changed.emit(False, "")
+            return ""
         self.recording_changed.emit(False, path)
         return path
 
@@ -361,6 +384,13 @@ class PlayerEngine(QObject):
     def _emit_stats(self) -> None:
         with self._relay_lock:
             relay = self._relay
+        # The container (and therefore the file extension) is only known once
+        # the first bytes arrive, so re-announce the path if it changed.
+        if self._recording and self._recorder is not None:
+            current = self._recorder.path
+            if current != self._rec_path:
+                self._rec_path = current
+                self.recording_changed.emit(True, current)
         if relay is None:
             return
         self.stats_changed.emit({

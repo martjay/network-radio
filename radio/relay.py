@@ -119,6 +119,13 @@ class Relay:
         self._upstream_ready = threading.Event()
         self._pump_bytes = 0
         self._marked = False
+        # The first bytes of the stream carry the container header (the Ogg BOS
+        # page, the ID3 tag, ...). ffmpeg cannot initialise a demuxer from
+        # mid-stream data alone, and the recorder is usually armed after
+        # playback has already consumed this, so a bounded prefix is kept and
+        # replayed to the recorder on attach.
+        self._head = bytearray()
+        self._head_limit = 8 * 1024
         # ~1.5 s of 320 kbps, the size of a typical server-side prebuffer
         self._mark_threshold = 60 * 1024
 
@@ -199,6 +206,8 @@ class Relay:
                     continue
                 idle = 0
                 self._upstream_ready.set()
+                if len(self._head) < self._head_limit:
+                    self._head += data
                 self._ring.write(data)
                 self._pump_bytes += len(data)
                 if not self._marked and self._pump_bytes > self._mark_threshold:
@@ -261,6 +270,12 @@ class Relay:
     @property
     def clients(self) -> int:
         return self._clients
+
+    @property
+    def head_bytes(self) -> bytes:
+        """The leading bytes of the stream, used to identify its container."""
+        with self._lock:
+            return bytes(self._head)
 
     # ------------------------------------------------------------------ #
     #  HTTP handler

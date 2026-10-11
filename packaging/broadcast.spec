@@ -9,6 +9,7 @@ Build with:  pyinstaller --clean --noconfirm broadcast.spec
 from __future__ import annotations
 
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_dynamic_libs
 
@@ -22,6 +23,26 @@ datas = [
     (os.path.join(ROOT, "assets", "stations.json"), "assets"),
     (os.path.join(ROOT, "README.md"), "."),
 ]
+
+# ---- application icon -----------------------------------------------------
+# The window, taskbar and tray icons are all generated from the same vector
+# mark at runtime; this .ico only supplies the shell's icon (Explorer, the
+# taskbar button before the window paints, and the shortcut).
+_ICO = os.path.join(ROOT, "assets", "broadcast.ico")
+if not os.path.isfile(_ICO):
+    try:
+        sys.path.insert(0, ROOT)
+        from PySide6.QtWidgets import QApplication
+        from radio import appicon
+
+        _app = QApplication.instance() or QApplication([])
+        appicon.write_ico(_ICO)
+        print(f"[spec] generated {_ICO}")
+    except Exception as _exc:  # noqa: BLE001
+        print(f"[spec] could not generate the icon ({_exc}); building without it")
+        _ICO = None
+icon_path = _ICO if _ICO and os.path.isfile(_ICO) else None
+datas.append((_ICO, "assets")) if icon_path else None
 
 # ---- Qt multimedia --------------------------------------------------------
 # Qt's FFmpeg backend is what actually decodes the audio streams. PyInstaller's
@@ -140,7 +161,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=icon_path,
 )
 
 coll = COLLECT(

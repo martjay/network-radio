@@ -669,6 +669,20 @@ class PreferencesDialog(DialogBase):
         self._fav = QCheckBox("只显示收藏的电台")
         self._fav.setChecked(bool(self.library.get("favorites_only", False)))
         lay.addWidget(self._fav)
+
+        lay.addWidget(hline(theme.STROKE_SOFT))
+        lay.addWidget(self._heading("托盘"))
+        self._tray_close = QCheckBox("关闭窗口时最小化到托盘（不退出程序）")
+        self._tray_close.setChecked(bool(self.library.get("close_to_tray", True)))
+        lay.addWidget(self._tray_close)
+        self._tray_notify = QCheckBox("最小化到托盘时显示提示")
+        self._tray_notify.setChecked(bool(self.library.get("tray_notifications", True)))
+        lay.addWidget(self._tray_notify)
+        tray_note = self._hint(
+            "托盘图标右键可播放 / 暂停、切换电台、录制、收藏或退出。"
+            "双击托盘图标可恢复窗口。"
+        )
+        lay.addWidget(tray_note)
         lay.addStretch(1)
         return page
 
@@ -747,13 +761,11 @@ class PreferencesDialog(DialogBase):
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(8)
         data_btn = TextButton("数据目录", "folder")
-        data_btn.clicked.connect(lambda: QDesktopServices.openUrl(
-            QUrl.fromLocalFile(paths.app_dir())))
+        data_btn.clicked.connect(lambda: self._open_path(paths.app_dir()))
         rec_btn = TextButton("录音目录", "folder")
-        rec_btn.clicked.connect(lambda: QDesktopServices.openUrl(
-            QUrl.fromLocalFile(self.library.get("recordings_dir") or paths.default_recordings_dir())))
+        rec_btn.clicked.connect(lambda: self._open_path(self._recordings_dir()))
         repo_btn = TextButton("项目主页", "external")
-        repo_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(paths.APP_REPO)))
+        repo_btn.clicked.connect(lambda: self._open_url(paths.APP_REPO))
         rl.addWidget(data_btn)
         rl.addWidget(rec_btn)
         rl.addWidget(repo_btn)
@@ -766,6 +778,36 @@ class PreferencesDialog(DialogBase):
         from PySide6.QtWidgets import QApplication
         QApplication.clipboard().setText(qq)
         self._flash("已复制作者 QQ 号")
+
+    def _recordings_dir(self) -> str:
+        """Recording directory, created if possible, with a writable fallback."""
+        from .main_window import _ensure_dir
+
+        wanted = self.library.get("recordings_dir") or paths.default_recordings_dir()
+        if _ensure_dir(wanted):
+            return wanted
+        fallback = os.path.join(paths.app_dir(), "recordings")
+        return fallback if _ensure_dir(fallback) else wanted
+
+    def _open_path(self, path: str) -> None:
+        from .main_window import _reveal_in_file_manager
+        if _reveal_in_file_manager(path):
+            self._flash("已打开目录")
+        else:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(path)
+            self._flash("无法打开，路径已复制")
+
+    def _open_url(self, url: str) -> None:
+        try:
+            if not QDesktopServices.openUrl(QUrl(url)):
+                from PySide6.QtWidgets import QApplication
+                QApplication.clipboard().setText(url)
+                self._flash("无法打开浏览器，链接已复制")
+        except Exception:  # noqa: BLE001
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(url)
+            self._flash("无法打开浏览器，链接已复制")
 
     def _flash(self, text: str) -> None:
         """Temporary confirmation in the dialog footer."""
@@ -809,6 +851,8 @@ class PreferencesDialog(DialogBase):
         self.library.set("auto_record", self._auto_rec.isChecked(), save=False)
         self.library.set("zh_only", self._zh.isChecked(), save=False)
         self.library.set("favorites_only", self._fav.isChecked(), save=False)
+        self.library.set("close_to_tray", self._tray_close.isChecked(), save=False)
+        self.library.set("tray_notifications", self._tray_notify.isChecked(), save=False)
         self.library.save()
 
 

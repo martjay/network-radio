@@ -144,8 +144,10 @@ ffmpeg 各构建对代理的支持不一致，且没有可移植的 SOCKS5 选�
 
 ### 录制
 - 直接复制原始音频流，**不二次编码**，音质与电台播出完全一致
-- 支持 MP3 / AAC / M4A / OGG / FLAC / WAV
-- 自动对齐帧边界，录制文件开头无爆音、可无损解码
+- 自动识别流格式并选择匹配的容器：MP3 流存为 `.mp3`，**Ogg/Opus 流存为 `.ogg`**，
+  AAC 流存为 `.aac` —— 不会把 Opus 数据塞进 `.mp3` 里产生无法播放的文件
+- 源格式与目标容器不兼容时自动转码（如存为 WAV / FLAC）
+- 首尾帧对齐，录制文件可无损解码
 - 可选择每次播放时自动录制
 
 ### 管理与界面
@@ -157,6 +159,32 @@ ffmpeg 各构建对代理的支持不一致，且没有可移植的 SOCKS5 选�
 - 定时关闭（15–120 分钟，可停止播放或退出程序）
 - 收藏导出为 M3U 播放列表
 - 无边框窗口，窗口状态与设置自动记忆
+- 高清屏自适应：DPI 缩放、窗口大小与位置跨会话记忆
+
+### 托盘
+关闭窗口**不会退出程序**，而是最小化到托盘继续播放。
+
+- 托盘图标右键菜单：显示主窗口、播放/暂停、停止、上一个/下一个电台、开始/停止录制、收藏当前电台、退出
+- 双击托盘图标恢复窗口
+- 鼠标悬停显示当前电台与正在播放的曲目
+- 可在设置中关闭「关闭时最小化到托盘」，改为直接退出
+
+![托盘菜单](docs/screenshot-tray-menu.png)
+
+### 图标
+
+窗口、任务栏、托盘三处图标同源，都由标题栏那个信号塔标记按需光栅化生成：
+
+- 程序内嵌 **10 种尺寸**（16–256 px），高分屏下不发虚
+- 打包时生成多分辨率 `.ico` 并嵌入 exe，资源管理器与任务栏显示正确图标
+- 设置了独立的 AppUserModelID，避免 Windows 把程序归到宿主进程而显示通用图标
+
+<p>
+<img src="docs/icon/icon-16.png" width="16" alt="16px">
+<img src="docs/icon/icon-32.png" width="32" alt="32px">
+<img src="docs/icon/icon-64.png" width="64" alt="64px">
+<img src="docs/icon/icon-128.png" width="128" alt="128px">
+</p>
 
 ### 快捷键
 
@@ -171,6 +199,8 @@ ffmpeg 各构建对代理的支持不一致，且没有可移植的 SOCKS5 选�
 | `Ctrl` + `E` | 导出收藏 |
 | `Ctrl` + `,` | 打开设置 |
 | `F11` | 最大化 / 还原 |
+
+关闭窗口 = 最小化到托盘（可在设置中改为直接退出）。退出请用托盘菜单的「退出」。
 
 ---
 
@@ -206,11 +236,13 @@ packaging/broadcast.spec  PyInstaller 配置
 radio/
   theme.py              设计令牌与全局样式表
   icons.py              全部图标（QPainter 矢量绘制，无字体图标、无 emoji）
+  appicon.py            程序图标：窗口/任务栏/托盘，多分辨率 .ico 生成
+  tray.py               系统托盘与右键菜单
   proxy.py              代理：系统检测、HTTP CONNECT、SOCKS5、ffmpeg shim
   net.py                流传输：TLS、ICY 解复用、播放列表解析、帧头解析、HLS
   relay.py              本地回环 HTTP 中继
   player.py             播放引擎、FFT 分析、状态机
-  recorder.py           录制（ffmpeg 管线）
+  recorder.py           录制（ffmpeg 管线、格式自适应）
   library.py            电台库与用户数据
   table.py              电台列表（模型 + 自绘委托）
   widgets.py            自绘控件（频谱、电平表、封面、导航、标题栏）
@@ -218,6 +250,7 @@ radio/
   main_window.py        主窗口
 tools/                  电台库构建与测试脚本
 assets/stations.json    电台库
+assets/broadcast.ico    程序图标（打包时使用）
 ```
 
 ### 关于本地中继
@@ -257,11 +290,15 @@ python build_stations.py  # 清洗、分类、均衡选样          -> ../assets
 ## 测试
 
 ```bash
-python tools/selftest.py         # 单元测试：帧头解析、播放列表、录制对齐
-python tools/test_proxy.py       # 代理：解析、系统检测、隧道、真实电台播放、ffmpeg shim
-python tools/test_proxy_ui.py    # 代理设置贯通到播放与连接测试
-python tools/test_functional.py  # 端到端：在真实窗口中播放、分析、录制、收藏、持久化
-python tools/test_dialogs.py     # 渲染全部对话框并截图
+python tools/selftest.py                # 单元测试：帧头解析、格式嗅探、容器选择、录制对齐
+python tools/test_recording_formats.py  # 录制：MP3 / Ogg-Opus / AAC 三种流格式
+python tools/test_opus_recording_ui.py  # 录制：Opus 电台在真实界面中的完整流程
+python tools/test_folder_button.py      # 录音目录按钮（含目录不可写的降级）
+python tools/test_tray_window.py        # 图标、托盘、关闭到托盘、窗口尺寸记忆、DPI
+python tools/test_proxy.py              # 代理：解析、系统检测、隧道、真实电台播放、ffmpeg shim
+python tools/test_proxy_ui.py           # 代理设置贯通到播放与连接测试
+python tools/test_functional.py         # 端到端：在真实窗口中播放、分析、录制、收藏、持久化
+python tools/test_dialogs.py            # 渲染全部对话框并截图
 ```
 
 `test_functional.py` 会真实连接电台，验证频谱有能量、元数据到达、录制文件可解码等，

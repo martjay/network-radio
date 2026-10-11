@@ -417,7 +417,11 @@ class StreamReader:
             data = self._resp.read(n)
         except (socket.timeout, TimeoutError) as exc:
             raise StreamError("stream stalled") from exc
-        except (OSError, http.client.HTTPException) as exc:
+        except AttributeError:
+            # The response was closed underneath us (relay shutdown).
+            self._eof = True
+            return b""
+        except (OSError, ValueError, http.client.HTTPException) as exc:
             raise StreamError(f"stream error: {exc}") from exc
         if not data:
             self._eof = True
