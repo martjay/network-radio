@@ -11,11 +11,12 @@ import time
 
 from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QBrush, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen,
+    QBrush, QCursor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath,
+    QPen,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QSlider,
-    QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QSizePolicy, QSlider, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import icons, theme
@@ -46,13 +47,28 @@ def section_label(text: str, spacing: float = 1.5) -> QLabel:
     return lab
 
 
+def show_copy_tip(widget: QWidget, message: str = "已复制") -> None:
+    """Flash a tooltip at the cursor. Deferred so Qt does not replace it
+    with the widget's hover tooltip on mouse-release."""
+    pos = QCursor.pos() + QPoint(14, 18)
+
+    def _show() -> None:
+        QToolTip.showText(pos, message, widget, QRect(), 1500)
+
+    QTimer.singleShot(0, _show)
+
+
 class ElideLabel(QLabel):
     """A label that elides its text to the available width."""
+
+    copied = Signal(str)
 
     def __init__(self, text: str = "", mode=Qt.TextElideMode.ElideRight, parent=None):
         super().__init__(parent)
         self._full = text
         self._mode = mode
+        self._copy_on_click = False
+        self._hover_tip = True
         # Ignored + a tiny hint: never fight the layout with the unelided
         # string width, which used to make the now-playing bar oscillate.
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -61,11 +77,41 @@ class ElideLabel(QLabel):
 
     def setText(self, text: str) -> None:  # noqa: N802
         self._full = text or ""
-        self.setToolTip(self._full if self._full else "")
+        self._sync_copy_tip()
         self._apply()
 
     def fullText(self) -> str:  # noqa: N802
         return self._full
+
+    def set_copy_on_click(self, enabled: bool = True) -> None:
+        self._copy_on_click = enabled
+        if enabled:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.unsetCursor()
+        self._sync_copy_tip()
+
+    def set_hover_tip(self, enabled: bool) -> None:
+        self._hover_tip = enabled
+        self._sync_copy_tip()
+
+    def _sync_copy_tip(self) -> None:
+        if self._copy_on_click and self._full:
+            self.setToolTip(f"{self._full}\n点击复制")
+        elif self._hover_tip and self._full:
+            self.setToolTip(self._full)
+        else:
+            self.setToolTip("")
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        if (self._copy_on_click and event.button() == Qt.MouseButton.LeftButton
+                and self._full.strip()):
+            QApplication.clipboard().setText(self._full)
+            self.copied.emit(self._full)
+            show_copy_tip(self)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(24, super().sizeHint().height())
@@ -86,18 +132,25 @@ class ElideLabel(QLabel):
 
 
 class ScrollingLabel(QWidget):
-    """Marquee label: static while the text fits, gently scrolling when it does not."""
+    """Marquee: centred while the text fits, looping when it does not."""
+
+    copied = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._text = ""
         self._offset = 0.0
         self._pause = 0.0
-        self._font = theme.font(12, 500)
-        self._color = theme.c(theme.TEXT)
-        self._gap = 64
+        self._hover = False
+        self._font = theme.font(12, 600)
+        self._color = theme.c(theme.ACCENT)
+        self._fade = theme.BG_SIDEBAR
+        self._align = Qt.AlignmentFlag.AlignHCenter
+        self._gap = 56
+        self._press_at: QPoint | None = None
         self.setMinimumHeight(20)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(24)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._timer = QTimer(self)
         self._timer.setInterval(28)
         self._timer.timeout.connect(self._tick)
@@ -105,16 +158,21 @@ class ScrollingLabel(QWidget):
     def setText(self, text: str) -> None:  # noqa: N802
         self._text = text or ""
         self._offset = 0.0
-        self._pause = 1.4
-        self.setToolTip(self._text)
+        self._pause = 1.6
+        self._sync_copy_tip()
         self._update_timer()
         self.update()
 
     def text(self) -> str:
         return self._text
 
+    def fullText(self) -> str:  # noqa: N802
+        return self._text
+
     def setFont(self, font: QFont) -> None:  # noqa: N802
         self._font = font
+        fm = QFontMetrics(font)
+        self.setMinimumHeight(max(20, fm.height() + 2))
         self._update_timer()
         self.update()
 
@@ -122,37 +180,86 @@ class ScrollingLabel(QWidget):
         self._color = theme.c(color)
         self.update()
 
+    def setFadeColor(self, color: str) -> None:  # noqa: N802
+        self._fade = color
+        self.update()
+
+    def setAlignment(self, align) -> None:  # noqa: N802
+        self._align = align
+        self.update()
+
+    def set_copy_on_click(self, enabled: bool = True) -> None:
+        if enabled:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.unsetCursor()
+
+    def _sync_copy_tip(self) -> None:
+        self.setToolTip(f"{self._text}\n点击复制" if self._text else "")
+
     def _overflow(self) -> float:
         fm = QFontMetrics(self._font)
-        return fm.horizontalAdvance(self._text) - max(0, self.width() - 2)
+        return fm.horizontalAdvance(self._text) - max(0, self.width() - 4)
 
     def _update_timer(self) -> None:
-        if self._overflow() > 0 and self.isVisible():
+        if self._overflow() > 0 and self.isVisible() and not self._hover:
             if not self._timer.isActive():
                 self._timer.start()
         else:
             self._timer.stop()
-            self._offset = 0.0
+            if self._overflow() <= 0:
+                self._offset = 0.0
 
     def _tick(self) -> None:
-        if self._overflow() <= 0:
+        if self._overflow() <= 0 or self._hover:
             self._timer.stop()
-            self._offset = 0.0
+            if self._overflow() <= 0:
+                self._offset = 0.0
             self.update()
             return
         if self._pause > 0:
             self._pause -= 0.028
             return
-        self._offset += 0.85
+        self._offset += 1.05
         span = QFontMetrics(self._font).horizontalAdvance(self._text) + self._gap
-        if self._offset >= span:
-            self._offset = 0.0
-            self._pause = 1.2
+        if span > 0 and self._offset >= span:
+            self._offset -= span
         self.update()
+
+    def enterEvent(self, event):  # noqa: N802
+        self._hover = True
+        self._timer.stop()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802
+        self._hover = False
+        self._update_timer()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_at = event.position().toPoint()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        start = self._press_at
+        self._press_at = None
+        if (event.button() == Qt.MouseButton.LeftButton and start is not None
+                and (event.position().toPoint() - start).manhattanLength() < 8
+                and self._text.strip()):
+            QApplication.clipboard().setText(self._text)
+            self.copied.emit(self._text)
+            show_copy_tip(self)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)
         self._update_timer()
+        self.update()
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
@@ -165,23 +272,29 @@ class ScrollingLabel(QWidget):
         p.setPen(QPen(self._color))
         rect = self.rect().adjusted(0, 0, -1, 0)
         fm = QFontMetrics(self._font)
+        if not self._text:
+            return
         if self._overflow() <= 0:
-            p.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._text)
+            p.drawText(rect, Qt.AlignmentFlag.AlignVCenter | self._align, self._text)
             return
         p.setClipRect(rect)
         y = rect.top() + (rect.height() + fm.ascent() - fm.descent()) // 2
+        span = fm.horizontalAdvance(self._text) + self._gap
         x = rect.left() - self._offset
         p.drawText(QPoint(int(x), y), self._text)
-        x2 = x + fm.horizontalAdvance(self._text) + self._gap
-        if x2 < rect.right():
-            p.drawText(QPoint(int(x2), y), self._text)
-        # fade the edges so text does not clip abruptly
-        grad = QLinearGradient(rect.left(), 0, rect.left() + 22, 0)
-        grad.setColorAt(0.0, theme.c(theme.BG_TITLEBAR))
-        grad.setColorAt(1.0, theme.c(theme.BG_TITLEBAR, 0.0))
+        p.drawText(QPoint(int(x + span), y), self._text)
+        fade = 18
+        left = QLinearGradient(rect.left(), 0, rect.left() + fade, 0)
+        left.setColorAt(0.0, theme.c(self._fade))
+        left.setColorAt(1.0, theme.c(self._fade, 0.0))
+        right = QLinearGradient(rect.right() - fade, 0, rect.right(), 0)
+        right.setColorAt(0.0, theme.c(self._fade, 0.0))
+        right.setColorAt(1.0, theme.c(self._fade))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(grad))
-        p.drawRect(QRect(rect.left(), rect.top(), 22, rect.height()))
+        p.setBrush(QBrush(left))
+        p.drawRect(QRect(rect.left(), rect.top(), fade, rect.height()))
+        p.setBrush(QBrush(right))
+        p.drawRect(QRect(rect.right() - fade, rect.top(), fade, rect.height()))
         p.end()
 
 
@@ -335,152 +448,6 @@ class LevelMeter(QWidget):
             p.setBrush(theme.c(theme.TEXT, 0.85))
             p.drawRect(QRectF(max(0.0, hold_x - 1.0), 0.0, 2.0, h))
         p.end()
-
-
-# --------------------------------------------------------------------------- #
-#  generated station artwork
-# --------------------------------------------------------------------------- #
-class ArtTile(QWidget):
-    """Deterministic generated cover art for a station.
-
-    The pattern is derived from the station name so a given station always
-    looks the same, and the palette stays inside the product's own accent
-    family rather than inventing random colours.
-    """
-
-    def __init__(self, size: int = 132, parent=None):
-        super().__init__(parent)
-        self._size = size
-        self._name = ""
-        self._sub = ""
-        self._playing = False
-        self.setFixedSize(size, size)
-
-    def set_station(self, name: str, sub: str = "") -> None:
-        self._name = name or ""
-        self._sub = sub or ""
-        self.update()
-
-    def set_playing(self, playing: bool) -> None:
-        self._playing = playing
-        self.update()
-
-    def _hash(self) -> int:
-        h = 2166136261
-        for ch in self._name:
-            h ^= ord(ch)
-            h = (h * 16777619) & 0xFFFFFFFF
-        return h
-
-    def paintEvent(self, event):  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        s = self._size
-        rect = QRectF(0.5, 0.5, s - 1.0, s - 1.0)
-
-        # base
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(theme.c("#101317"))
-        p.drawRoundedRect(rect, theme.RADIUS_LG, theme.RADIUS_LG)
-
-        p.save()
-        clip = QPainterPath()
-        clip.addRoundedRect(rect, theme.RADIUS_LG, theme.RADIUS_LG)
-        p.setClipPath(clip)
-
-        h = self._hash()
-        variant = h % 4
-
-        if variant == 0:
-            # concentric broadcast arcs from the lower-left
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            for i in range(7):
-                r = s * (0.28 + i * 0.20)
-                p.setPen(QPen(theme.c(theme.ACCENT, max(0.05, 0.42 - i * 0.055)), 1.4))
-                p.drawEllipse(QRectF(-r * 0.35, s - r * 0.65, r * 2, r * 2))
-        elif variant == 1:
-            # diagonal rule field
-            p.setPen(QPen(theme.c(theme.ACCENT, 0.24), 1.2))
-            step = max(7, s // 11)
-            for i in range(-s, s * 2, step):
-                p.drawLine(i, 0, i + s, s)
-            p.setPen(QPen(theme.c(theme.ACCENT, 0.55), 2.0))
-            p.drawLine(int(s * 0.12), int(s * 0.86), int(s * 0.88), int(s * 0.14))
-        elif variant == 2:
-            # waveform blocks
-            p.setPen(Qt.PenStyle.NoPen)
-            bars = 13
-            bw = s / (bars * 1.7)
-            for i in range(bars):
-                t = i / (bars - 1)
-                hh = (0.18 + 0.62 * abs(math.sin(t * math.pi * 1.7 + (h % 7)))) * s
-                x = s * 0.09 + i * (bw * 1.7)
-                p.setBrush(theme.c(theme.ACCENT, 0.20 + 0.55 * (1 - abs(t - 0.5) * 1.6)))
-                p.drawRoundedRect(QRectF(x, (s - hh) / 2, bw, hh), bw / 2.4, bw / 2.4)
-        else:
-            # contour rings
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            cx, cy = s * 0.5, s * 0.52
-            for i in range(9):
-                rr = s * (0.06 + i * 0.055)
-                wob = 1.0 + 0.16 * math.sin(i * 1.3 + (h % 11))
-                p.setPen(QPen(theme.c(theme.ACCENT, 0.30 - i * 0.022), 1.3))
-                p.drawEllipse(QRectF(cx - rr * wob, cy - rr * 0.72, rr * 2 * wob, rr * 1.44))
-
-        # vignette so the initials stay legible
-        grad = QLinearGradient(0, s * 0.30, 0, s)
-        grad.setColorAt(0.0, theme.c("#0b0d10", 0.0))
-        grad.setColorAt(1.0, theme.c("#0b0d10", 0.86))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(grad))
-        p.drawRect(QRectF(0, 0, s, s))
-        p.restore()
-
-        # initials
-        initials = self._initials()
-        f = theme.font(int(s * 0.30), 800, spacing=1.5)
-        p.setFont(f)
-        p.setPen(QPen(theme.c(theme.TEXT, 0.94)))
-        p.drawText(
-            QRectF(0, s * 0.30, s, s * 0.44),
-            Qt.AlignmentFlag.AlignCenter, initials,
-        )
-
-        if self._sub:
-            p.setFont(theme.font(max(8, int(s * 0.085)), 600, mono=True, spacing=0.6))
-            p.setPen(QPen(theme.c(theme.ACCENT, 0.92)))
-            p.drawText(
-                QRectF(0, s * 0.735, s, s * 0.18),
-                Qt.AlignmentFlag.AlignCenter, self._sub[:22],
-            )
-
-        # live badge
-        if self._playing:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(theme.c(theme.REC))
-            p.drawEllipse(QRectF(s - 22, 12, 6, 6))
-            p.setFont(theme.font(8, 800, spacing=1.2))
-            p.setPen(QPen(theme.c(theme.REC)))
-            p.drawText(QRectF(s - 62, 8, 34, 14), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "LIVE")
-
-        # frame
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(theme.c(theme.STROKE), 1))
-        p.drawRoundedRect(rect, theme.RADIUS_LG, theme.RADIUS_LG)
-        p.end()
-
-    def _initials(self) -> str:
-        name = self._name.strip()
-        if not name:
-            return "--"
-        # CJK: first two characters
-        if any("\u4e00" <= ch <= "\u9fff" for ch in name):
-            cjk = [ch for ch in name if "\u4e00" <= ch <= "\u9fff"]
-            return "".join(cjk[:2])
-        words = [w for w in name.replace("-", " ").replace("_", " ").split() if w]
-        if len(words) >= 2:
-            return (words[0][0] + words[1][0]).upper()
-        return name[:2].upper()
 
 
 # --------------------------------------------------------------------------- #
@@ -646,6 +613,7 @@ class StatRow(QWidget):
         self._value = ElideLabel(value)
         self._value.setObjectName("CardValue")
         self._value.setFont(theme.font(11, 500, mono=True))
+        self._value.set_hover_tip(False)
         lay.addWidget(self._label)
         lay.addWidget(self._value)
 
@@ -662,7 +630,7 @@ class StatRow(QWidget):
 #  custom title bar
 # --------------------------------------------------------------------------- #
 class TitleBar(QWidget):
-    """Frameless window chrome: mark, live now-playing readout, window buttons."""
+    """Frameless window chrome: brand mark and window buttons. Empty middle is for dragging."""
 
     minimize_clicked = Signal()
     maximize_clicked = Signal()
@@ -681,38 +649,17 @@ class TitleBar(QWidget):
         mark = QLabel()
         mark.setPixmap(icons.brand_pixmap(20, theme.ACCENT))
         mark.setFixedSize(20, 20)
-        lay.addWidget(mark)
-
         brand = QLabel("BROADCAST")
         brand.setObjectName("BrandMark")
         brand.setFont(theme.font(13, 800, spacing=2.6))
-        lay.addWidget(brand)
-
         sub = QLabel("NETWORK RADIO")
         sub.setObjectName("BrandSub")
         sub.setFont(theme.font(10, 600, spacing=1.4))
-        lay.addWidget(sub)
+        for w in (mark, brand, sub):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            lay.addWidget(w)
 
-        lay.addSpacing(14)
-        lay.addWidget(vline(theme.STROKE, 1))
-
-        self._indicator = PlayingIndicator(self)
-        lay.addSpacing(6)
-        lay.addWidget(self._indicator)
-
-        self._ticker = ScrollingLabel()
-        self._ticker.setFont(theme.font(12, 500))
-        self._ticker.setColor(theme.TEXT_DIM)
-        self._ticker.setMinimumWidth(120)
-        lay.addWidget(self._ticker, 1)
-
-        self._codec = QLabel("")
-        self._codec.setObjectName("CardValueDim")
-        self._codec.setFont(theme.font(10, 600, mono=True))
-        self._codec.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-family: '{theme.mono_family()}'; font-size: 10px;")
-        lay.addWidget(self._codec)
-
-        lay.addSpacing(6)
+        lay.addStretch(1)
 
         self._btn_min = self._win_button("minimize", "最小化", self.minimize_clicked)
         self._btn_max = self._win_button("maximize", "最大化", self.maximize_clicked)
@@ -730,13 +677,6 @@ class TitleBar(QWidget):
         b.setToolTip(tip)
         b.clicked.connect(signal.emit)
         return b
-
-    def set_now_playing(self, text: str, playing: bool) -> None:
-        self._ticker.setText(text or "")
-        self._indicator.set_active(playing)
-
-    def set_codec(self, text: str) -> None:
-        self._codec.setText(text or "")
 
     def set_maximized(self, maximized: bool) -> None:
         self._btn_max.setIcon(icons.icon("restore" if maximized else "maximize", 13, theme.TEXT_DIM))
@@ -973,3 +913,6 @@ class KeyValueRow(QWidget):
         self._v.setStyleSheet(
             f"color: {theme.TEXT_MUTED if dim else theme.TEXT_DIM}; font-size: 11px;"
         )
+
+    def set_hover_tip(self, enabled: bool) -> None:
+        self._v.set_hover_tip(enabled)

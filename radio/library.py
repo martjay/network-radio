@@ -105,6 +105,7 @@ class Library(QObject):
         self._by_url: dict[str, dict] = {}
         self._load_catalogue()
         self._load_userdata()
+        self._sanitize_settings()
 
     # ------------------------------------------------------------------ #
     #  catalogue
@@ -182,6 +183,13 @@ class Library(QObject):
             s.setdefault("score", 0.0)
             s.setdefault("zh", False)
         self._reindex()
+
+    def _sanitize_settings(self) -> None:
+        """Drop leftover test/temp recordings paths so REC stays the real default."""
+        raw = (self.settings.get("recordings_dir") or "").strip()
+        if raw and paths.is_transient_recordings_dir(raw):
+            self.settings["recordings_dir"] = ""
+            self.save()
 
     def save(self) -> None:
         payload = json.dumps(

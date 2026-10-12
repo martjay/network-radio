@@ -132,9 +132,9 @@ QWidget#Root[chrome="flush"] {{
 QToolTip {{
     background: {BG_PANEL_ALT};
     color: {TEXT};
-    border: 1px solid {STROKE_STRONG};
-    padding: 5px 8px;
-    font-size: 11px;
+    border: 1px solid {ACCENT_DIM};
+    padding: 6px 10px;
+    font-size: 12px;
 }}
 
 /* ---------------------------------------------------------------- titlebar */
@@ -670,12 +670,20 @@ QRadioButton {{
     font-size: 12px;
     spacing: 7px;
 }}
+QRadioButton:checked {{
+    color: {TEXT};
+    font-weight: 600;
+}}
 QRadioButton::indicator {{
     width: 14px;
     height: 14px;
     border: 1px solid {STROKE_STRONG};
     border-radius: 7px;
     background: {BG_INPUT};
+}}
+QRadioButton::indicator:unchecked {{
+    background: {BG_INPUT};
+    border-color: {STROKE_STRONG};
 }}
 QRadioButton::indicator:checked {{
     background: {ACCENT};

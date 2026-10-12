@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from radio.net import parse_encoded_bitrate, parse_playlist  # noqa: E402
+from radio.net import decode_stream_title, parse_encoded_bitrate, parse_playlist  # noqa: E402
 
 FAILS: list[str] = []
 
@@ -194,6 +194,17 @@ def main() -> int:
     _relay._pending = bytearray(b"HEADERLIVE")
     check("not wrapped -> no duplication",
           _relay.drain_for_recorder(True), b"HEADERLIVE")
+
+    print("\nICY StreamTitle decoding")
+    check("plus as space",
+          decode_stream_title("Kygo,+Ava+Max+-+Whatever"),
+          "Kygo, Ava Max - Whatever")
+    check("percent spaces", decode_stream_title("Hello%20World"), "Hello World")
+    check("keep plus when already spaced",
+          decode_stream_title("AC+DC - Thunderstruck"),
+          "AC+DC - Thunderstruck")
+    check("html entity", decode_stream_title("Tom &amp; Jerry"), "Tom & Jerry")
+    check("empty", decode_stream_title(""), "")
 
     print()
     if FAILS:

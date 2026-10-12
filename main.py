@@ -382,6 +382,8 @@ def _install_crash_logging() -> None:
 def main() -> int:
     _install_crash_logging()
     _configure_dpi()
+    from radio.winjob import attach_kill_on_close
+    attach_kill_on_close()
     app = QApplication(sys.argv)
     app.setApplicationName(paths.APP_NAME)
     app.setApplicationDisplayName(paths.APP_TITLE)

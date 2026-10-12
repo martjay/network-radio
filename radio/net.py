@@ -9,11 +9,14 @@ upstream half of that design.
 """
 from __future__ import annotations
 
+import html
 import http.client
 import re
 import socket
 import ssl
 import subprocess
+import sys
+import threading
 import time
 import urllib.parse
 
@@ -35,6 +38,28 @@ AUDIO_TYPES = (
 )
 
 _TITLE_RE = re.compile(r"StreamTitle\s*=\s*'(.*?)'\s*;", re.S)
+
+
+def decode_stream_title(raw: str) -> str:
+    """Turn Icecast StreamTitle into readable text.
+
+    Many servers send titles as `application/x-www-form-urlencoded`
+    (`Kygo,+Ava+Max` instead of `Kygo, Ava Max`). Percent-decode first;
+    only then treat `+` as space when the string has no real spaces yet.
+    """
+    text = (raw or "").strip("\x00 \r\n")
+    if not text:
+        return ""
+    try:
+        text = urllib.parse.unquote(text, errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+    if "+" in text and " " not in text:
+        text = text.replace("+", " ")
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 _URL_RE = re.compile(r"StreamUrl\s*=\s*'(.*?)'\s*;", re.S)
 
 
@@ -117,10 +142,45 @@ class StreamError(Exception):
 class NeedsFfmpeg(StreamError):
     """Raised when a stream can only be consumed through ffmpeg (HLS)."""
 
+    def __init__(self, message: str = "HLS stream", url: str = ""):
+        super().__init__(message)
+        self.url = url
+
 
 # --------------------------------------------------------------------------- #
 #  low level connection
 # --------------------------------------------------------------------------- #
+def _arm_live_socket(sock) -> None:
+    """Keep a live Icecast socket open: block on reads, TCP keepalive on NAT."""
+    if sock is None:
+        return
+    try:
+        sock.settimeout(None)
+    except OSError:
+        pass
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        pass
+    if sys.platform == "win32":
+        try:
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 45_000, 5_000))
+        except (OSError, AttributeError):
+            pass
+        return
+    for opt, val in (
+        (getattr(socket, "TCP_KEEPIDLE", None), 45),
+        (getattr(socket, "TCP_KEEPINTVL", None), 10),
+        (getattr(socket, "TCP_KEEPCNT", None), 8),
+    ):
+        if opt is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, opt, val)
+        except OSError:
+            pass
+
+
 def _make_conn(scheme: str, host: str, port: int, timeout: float, verify: bool,
                proxy=None):
     """Build an http.client connection, routed through `proxy` when needed."""
@@ -315,17 +375,17 @@ class StreamReader:
             # HLS manifests are not a list of stream URLs but a segment
             # timeline: hand those to ffmpeg, which can consume them directly.
             if self._is_hls(body, ct):
-                raise NeedsFfmpeg("HLS stream")
+                raise NeedsFfmpeg("HLS stream", self.url)
             links = parse_playlist(body.decode("utf-8", "replace"), final)
             if not links:
-                raise NeedsFfmpeg("playlist contained no direct stream url")
+                raise NeedsFfmpeg("playlist contained no direct stream url", self.url)
             # Recurse once into the first usable entry.
             last: Exception | None = None
             for link in links[:4]:
                 try:
                     return StreamReader(link, self.timeout, proxy=self.proxy).open(resolve_playlist=False)
-                except NeedsFfmpeg:
-                    raise
+                except NeedsFfmpeg as exc:
+                    raise NeedsFfmpeg(str(exc) or "HLS stream", exc.url or link) from exc
                 except StreamError as exc:
                     last = exc
             raise StreamError(f"playlist targets unreachable: {last}")
@@ -352,6 +412,11 @@ class StreamReader:
             self.bitrate_hint = 0
         self._need = self._metaint
         self.opened_at = time.time()
+        # The connection timeout must not apply to the live read: Icecast
+        # sockets stay quiet during talk/pause, and a 14s socket timeout
+        # would kill a healthy station with "stream stalled".
+        sock = getattr(self._conn, "sock", None)
+        _arm_live_socket(sock)
         return self
 
     def _looks_like_playlist_url(self) -> bool:
@@ -401,13 +466,13 @@ class StreamReader:
             return
         m = _TITLE_RE.search(text)
         if m:
-            title = m.group(1).strip()
+            title = decode_stream_title(m.group(1))
             if title and title != self.now_playing:
                 self.now_playing = title
             return
         # some servers send a bare string
         if "=" not in text and 2 < len(text) < 200:
-            self.now_playing = text
+            self.now_playing = decode_stream_title(text)
 
     # -- reading -----------------------------------------------------------
     def _raw_read(self, n: int) -> bytes:
@@ -503,6 +568,29 @@ class StreamReader:
         self._mark_bytes = self.bytes_audio
 
 
+def _friendly_hls_error(stderr: str) -> str:
+    text = (stderr or "").strip()
+    low = text.lower()
+    if "unknown encoder" in low or "encoder not found" in low:
+        return "当前 ffmpeg 缺少音频编码器，无法转码 HLS"
+    if re.search(r"server returned 40[13]|http error 40[13]|access denied", low):
+        return "HLS 服务器拒绝访问"
+    if re.search(r"server returned 404|http error 404", low):
+        return "HLS 地址无效"
+    if "certificate" in low or "ssl" in low or "tls" in low:
+        return "HLS 证书校验失败"
+    if "timed out" in low or "timeout" in low:
+        return "HLS 连接超时"
+    if "connection refused" in low:
+        return "HLS 连接被拒绝"
+    if "does not contain any stream" in low or "matches no streams" in low:
+        return "该 HLS 流没有可用音频"
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if lines:
+        return f"无法打开 HLS 流：{lines[-1][:160]}"
+    return "ffmpeg 无法打开该 HLS 流"
+
+
 # --------------------------------------------------------------------------- #
 #  ffmpeg backed reader (HLS and other segmented protocols)
 # --------------------------------------------------------------------------- #
@@ -510,9 +598,8 @@ class FfmpegReader:
     """Reads audio through an ffmpeg subprocess.
 
     Used for HLS manifests, which are a segment timeline rather than a byte
-    stream. ffmpeg re-muxes to MP3 (`-c:a copy` when the source is already
-    MP3, otherwise a high-bitrate encode) so the rest of the pipeline sees the
-    same kind of byte stream it gets from a plain Icecast server.
+    stream. ffmpeg remuxes/encodes to a Qt-playable elementary stream so the
+    rest of the pipeline sees the same kind of bytes it gets from Icecast.
     """
 
     def __init__(self, url: str, timeout: float = 20.0, bitrate_kbps: int = 192,
@@ -535,63 +622,135 @@ class FfmpegReader:
         self._first = b""
         self._sniff = bytearray()
         self._sniffed = False
+        self._err = bytearray()
         self.encoded_kbps = 0
         self.encoded_rate = 0
         self.encoded_channels = 0
 
     def open(self, resolve_playlist: bool = True) -> "FfmpegReader":
-        from .recorder import CREATE_NO_WINDOW, ffmpeg_path
+        from .recorder import CREATE_NO_WINDOW, ffmpeg_audio_pipe_args, ffmpeg_path
 
         exe = ffmpeg_path()
         if not exe:
             raise StreamError("该电台使用 HLS 格式，需要 ffmpeg 支持（未找到 ffmpeg）")
-        cmd = [
-            exe, "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-rw_timeout", str(int(self.timeout * 1_000_000)),
+        out_args, content_type = ffmpeg_audio_pipe_args(self.bitrate_kbps)
+        last_err = ""
+        for rich in (True, False):
+            cmd = self._build_cmd(exe, out_args, rich_hls=rich)
+            try:
+                proc = self._spawn(cmd, CREATE_NO_WINDOW)
+            except Exception as exc:  # noqa: BLE001
+                raise StreamError(f"无法启动 ffmpeg：{exc}") from exc
+            first = self._wait_stdout(proc, self.timeout)
+            if first:
+                self._proc = proc
+                self._first = first
+                self.content_type = content_type
+                self.opened_at = time.time()
+                self.encoded_kbps = self.bitrate_kbps
+                return self
+            last_err = bytes(self._err).decode("utf-8", "replace")
+            self._stop_proc(proc)
+            low = last_err.lower()
+            if rich and ("option not found" in low or "unrecognized option" in low
+                         or not last_err):
+                continue
+            break
+        raise StreamError(_friendly_hls_error(last_err))
+
+    def _build_cmd(self, exe: str, out_args: list[str], *, rich_hls: bool) -> list[str]:
+        us = str(int(max(self.timeout, 15.0) * 1_000_000))
+        parsed = urllib.parse.urlparse(self.url)
+        origin = f"{parsed.scheme}://{parsed.netloc}/"
+        cmd = [exe, "-hide_banner", "-loglevel", "error", "-nostdin"]
+        if rich_hls:
+            cmd += [
+                "-protocol_whitelist",
+                "file,http,https,tcp,tls,crypto,udp,rtp,httpproxy",
+                "-allowed_extensions", "ALL",
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "4",
+                "-seekable", "0",
+                "-fflags", "+genpts+discardcorrupt",
+            ]
+        cmd += [
+            "-rw_timeout", us,
             "-user_agent", DEFAULT_UA,
+            "-headers", f"Referer: {origin}\r\n",
         ]
         if self.proxy_shim_url:
             # Route ffmpeg through the local CONNECT shim, which handles HTTP,
             # HTTPS, SOCKS5 and credentials uniformly.
             cmd += ["-http_proxy", self.proxy_shim_url]
-        cmd += [
-            "-i", self.url,
-            "-vn", "-c:a", "libmp3lame", "-b:a", f"{self.bitrate_kbps}k",
-            "-f", "mp3", "pipe:1",
-        ]
-        try:
-            self._proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                bufsize=0,
-                creationflags=CREATE_NO_WINDOW,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise StreamError(f"无法启动 ffmpeg：{exc}") from exc
+        cmd += ["-i", self.url, "-vn", "-sn", "-dn"]
+        cmd += out_args
+        cmd += ["pipe:1"]
+        return cmd
 
-        # Wait for the first bytes so a dead manifest fails fast instead of
-        # leaving the UI in "connecting" forever.
-        first = b""
-        deadline = time.time() + self.timeout
-        while time.time() < deadline:
-            if self._proc.poll() is not None:
-                raise StreamError("ffmpeg 无法打开该 HLS 流")
+    def _spawn(self, cmd: list[str], creationflags: int) -> subprocess.Popen:
+        self._err = bytearray()
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            bufsize=0,
+            creationflags=creationflags,
+        )
+
+        def drain() -> None:
             try:
-                first = self._proc.stdout.read(4096)  # type: ignore[union-attr]
-            except Exception as exc:  # noqa: BLE001
-                raise StreamError(f"读取失败：{exc}") from exc
-            if first:
-                break
-        if not first:
-            self.close()
-            raise StreamError("HLS 流无音频数据")
+                while True:
+                    chunk = proc.stderr.read(512)  # type: ignore[union-attr]
+                    if not chunk:
+                        break
+                    self._err.extend(chunk)
+                    if len(self._err) > 12000:
+                        del self._err[: len(self._err) - 6000]
+            except Exception:  # noqa: BLE001
+                pass
 
-        self._first = first
-        self.opened_at = time.time()
-        self.encoded_kbps = self.bitrate_kbps  # ffmpeg re-encodes at this rate
-        return self
+        threading.Thread(target=drain, daemon=True, name="ffmpeg-err").start()
+        return proc
+
+    def _wait_stdout(self, proc: subprocess.Popen, timeout: float) -> bytes:
+        bucket: list[bytes] = []
+
+        def read() -> None:
+            try:
+                bucket.append(proc.stdout.read(8192) or b"")  # type: ignore[union-attr]
+            except Exception:  # noqa: BLE001
+                bucket.append(b"")
+
+        t = threading.Thread(target=read, daemon=True, name="ffmpeg-out")
+        t.start()
+        t.join(max(1.0, timeout))
+        if not bucket and proc.poll() is not None:
+            t.join(0.4)
+        return bucket[0] if bucket else b""
+
+    @staticmethod
+    def _stop_proc(proc: subprocess.Popen | None) -> None:
+        if proc is None:
+            return
+        # Kill first. Closing stdout while the pump thread is blocked in
+        # read() deadlocks on Windows and leaves Broadcast.exe behind.
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        for stream in (proc.stdout, proc.stdin, proc.stderr):
+            try:
+                if stream:
+                    stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            proc.wait(timeout=1.5)
+        except Exception:  # noqa: BLE001
+            pass
 
     def read(self, n: int = 8192) -> bytes:
         if self._proc is None:
@@ -621,22 +780,7 @@ class FfmpegReader:
 
     def close(self) -> None:
         proc, self._proc = self._proc, None
-        if proc is None:
-            return
-        for stream in (proc.stdout, proc.stdin):
-            try:
-                if stream:
-                    stream.close()
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            proc.terminate()
-            proc.wait(timeout=3)
-        except Exception:  # noqa: BLE001
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
+        self._stop_proc(proc)
 
     @property
     def live_seconds(self) -> float:
@@ -663,12 +807,13 @@ def open_stream(url: str, timeout: float = 14.0, proxy=None, shim_factory=None):
     """
     try:
         return StreamReader(url, timeout=timeout, proxy=proxy).open()
-    except NeedsFfmpeg:
+    except NeedsFfmpeg as exc:
         shim_url = ""
         if shim_factory is not None and proxy is not None and proxy.usable:
             shim_url = shim_factory() or ""
         return FfmpegReader(
-            url, timeout=max(timeout, 20.0), proxy=proxy, proxy_shim_url=shim_url
+            exc.url or url, timeout=max(timeout, 22.0),
+            proxy=proxy, proxy_shim_url=shim_url,
         ).open()
 
 

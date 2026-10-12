@@ -17,13 +17,14 @@ from .dialogs import (
     ExportDialog, PreferencesDialog, ReportDialog, StationDialog, confirm, info,
 )
 from .library import SORT_MODES, Library
+from .net import decode_stream_title
 from .player import PlayerEngine
 from .table import GENRE_ZH, StationModel, StationTable
 from .tray import TrayController
 from .widgets import (
-    ArtTile, Chip, ElideLabel, IconButton, KeyValueRow, LevelMeter, NavItem,
-    PlayingIndicator, SearchField, SpectrumWidget, StatRow, TextButton, TransportButton,
-    VolumeControl, hline, section_label, vline,
+    Chip, ElideLabel, IconButton, KeyValueRow, LevelMeter, NavItem,
+    PlayingIndicator, ScrollingLabel, SearchField, SpectrumWidget, StatRow,
+    TextButton, TransportButton, VolumeControl, hline, section_label, vline,
 )
 
 
@@ -480,15 +481,12 @@ class MainWindow(QWidget):
         bar.setObjectName("Toolbar")
         bar.setFixedHeight(84)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setContentsMargins(14, 8, 12, 8)
         lay.setSpacing(12)
-
-        self._mini_art = ArtTile(56, self)
-        lay.addWidget(self._mini_art)
 
         info_wrap = QWidget()
         info_wrap.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        info_wrap.setMinimumWidth(64)
+        info_wrap.setMinimumWidth(120)
         info_col = QVBoxLayout(info_wrap)
         info_col.setContentsMargins(0, 0, 0, 0)
         info_col.setSpacing(1)
@@ -508,9 +506,12 @@ class MainWindow(QWidget):
         self._mini_meta.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         info_col.addWidget(self._mini_meta)
 
-        self._mini_track = ElideLabel("")
+        self._mini_track = ScrollingLabel()
         self._mini_track.setFont(theme.font(11, 500))
-        self._mini_track.setStyleSheet(f"color: {theme.ACCENT};")
+        self._mini_track.setColor(theme.ACCENT)
+        self._mini_track.setFadeColor(theme.BG_TOOLBAR)
+        self._mini_track.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._mini_track.set_copy_on_click(True)
         info_col.addWidget(self._mini_track)
         lay.addWidget(info_wrap, 1)
 
@@ -593,10 +594,12 @@ class MainWindow(QWidget):
         self._np_sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         lay.addWidget(self._np_sub)
 
-        self._np_track = ElideLabel("")
+        self._np_track = ScrollingLabel()
         self._np_track.setObjectName("NpMeta")
-        self._np_track.setFont(theme.font(11, 600))
-        self._np_track.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._np_track.setFont(theme.font(12, 600))
+        self._np_track.setColor(theme.ACCENT)
+        self._np_track.setFadeColor(theme.BG_SIDEBAR)
+        self._np_track.set_copy_on_click(True)
         lay.addWidget(self._np_track)
 
         # ---- spectrum --------------------------------------------------
@@ -632,6 +635,7 @@ class MainWindow(QWidget):
         self._info_rows: dict[str, KeyValueRow] = {}
         for key in ("国家", "地区", "语言", "类型", "标签", "投票", "播放次数"):
             row = KeyValueRow(key, "--")
+            row.set_hover_tip(key == "标签")
             self._info_rows[key] = row
             lay.addWidget(row)
 
@@ -765,8 +769,6 @@ class MainWindow(QWidget):
         self.engine.stats_changed.connect(self._on_stats)
         self.engine.recording_changed.connect(self._on_recording_changed)
         self.engine.buffer_health.connect(self._buffer_bar.set_value)
-        self.engine.icy_name_changed.connect(self._on_icy_name)
-
         self.library.favorites_changed.connect(self._on_favorites_changed)
         self.library.custom_changed.connect(lambda: self._apply_filters())
         self.library.history_changed.connect(self._refresh_sidebar_counts)
@@ -814,12 +816,14 @@ class MainWindow(QWidget):
             if self._in_resize_corner(gp):
                 edges = Qt.Edge.RightEdge | Qt.Edge.BottomEdge
             if et == QEvent.Type.MouseMove:
-                self._apply_resize_cursor(widget, edges)
+                self._apply_resize_cursor(edges)
             elif (et == QEvent.Type.MouseButtonPress
                     and event.button() == Qt.MouseButton.LeftButton
                     and edges):
                 self._begin_edge_resize(gp, edges)
                 return True
+        if et == QEvent.Type.Leave and obj is self and not self._rz_edges:
+            self.unsetCursor()
         return super().eventFilter(obj, event)
 
     def _platform_geo(self) -> QRect:
@@ -888,37 +892,47 @@ class MainWindow(QWidget):
         return gp.x() >= r.x() + r.width() - 36 and gp.y() >= r.y() + r.height() - 36
 
     def _resize_edges_at(self, gp: QPoint):
-        """Which Qt.Edge values the global point sits on, or 0."""
+        """Which Qt.Edge values the global point sits on, or 0.
+
+        Hit-test against the visible client, not the HWND, so DPI / DWM
+        padding cannot turn the whole title bar into a top-resize strip.
+        Keep the band thin so the title bar stays a move handle.
+        """
         if self.isMaximized() or self.isFullScreen():
             return Qt.Edge(0)
-        b = 16
-        r = self._platform_geo()
+        origin = self.mapToGlobal(QPoint(0, 0))
+        x = gp.x() - origin.x()
+        y = gp.y() - origin.y()
+        w, h = self.width(), self.height()
+        b = 6
         edges = Qt.Edge(0)
-        if gp.x() < r.x() + b:
+        if x < b:
             edges |= Qt.Edge.LeftEdge
-        if gp.x() >= r.x() + r.width() - b:
+        if x >= w - b:
             edges |= Qt.Edge.RightEdge
-        if gp.y() < r.y() + b:
+        if y < b:
             edges |= Qt.Edge.TopEdge
-        if gp.y() >= r.y() + r.height() - b:
+        if y >= h - b:
             edges |= Qt.Edge.BottomEdge
         return edges
 
-    def _apply_resize_cursor(self, widget: QWidget, edges) -> None:
+    def _apply_resize_cursor(self, edges) -> None:
+        # Always set the window cursor, never a child's: a SizeVer left on
+        # the title bar was inherited by the empty drag area.
         left = bool(edges & Qt.Edge.LeftEdge)
         right = bool(edges & Qt.Edge.RightEdge)
         top = bool(edges & Qt.Edge.TopEdge)
         bottom = bool(edges & Qt.Edge.BottomEdge)
         if (left and top) or (right and bottom):
-            widget.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
         elif (right and top) or (left and bottom):
-            widget.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
         elif left or right:
-            widget.setCursor(Qt.CursorShape.SizeHorCursor)
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
         elif top or bottom:
-            widget.setCursor(Qt.CursorShape.SizeVerCursor)
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
         else:
-            widget.unsetCursor()
+            self.unsetCursor()
 
     def _place_resize_corner(self) -> None:
         c = getattr(self, "_resize_corner", None)
@@ -1170,7 +1184,6 @@ class MainWindow(QWidget):
         self._act_fav.setIcon(icons.icon("heart_filled" if fav else "heart", 14,
                                          theme.REC if fav else theme.TEXT_DIM))
         self._act_home.setEnabled(bool(station.get("homepage")))
-        self._mini_art.set_station(name, (station.get("codec") or "").upper())
 
     def _current_station(self) -> dict | None:
         idx = self.table.currentIndex()
@@ -1260,7 +1273,6 @@ class MainWindow(QWidget):
         playing = state in ("playing", "buffering")
         self._btn_play.set_icon_name("pause" if playing else "play")
         self._mini_indicator.set_active(state == "playing")
-        self.titlebar.set_now_playing(self._mini_track.fullText(), state == "playing")
         self._spectrum.set_active(state == "playing")
 
         if state == "idle":
@@ -1310,14 +1322,13 @@ class MainWindow(QWidget):
         if station.get("bitrate"):
             bits.append(f"{station['bitrate']} kbps")
         self._mini_meta.setText(" · ".join(bits))
-        self.titlebar.set_codec(f"{station.get('codec', '')} {station.get('bitrate', '')}k".strip())
         self.model.refresh_row(station.get("url", ""))
 
     def _on_metadata(self, title: str) -> None:
+        title = decode_stream_title(title)
         prev = self._mini_track.fullText()
         self._mini_track.setText(title)
         self._np_track.setText(title)
-        self.titlebar.set_now_playing(title, self.engine.state == "playing")
         self._sync_tray()
         if (title and title != prev
                 and bool(self.library.get("notify_track", False))
@@ -1325,14 +1336,12 @@ class MainWindow(QWidget):
             station = self.engine.station.get("name", "") if self.engine.station else ""
             self.tray.notify(station or paths.APP_TITLE, title)
 
-    def _on_icy_name(self, name: str) -> None:
-        if name and not self._mini_track.fullText():
-            self._mini_meta.setText(name)
-
     def _on_error(self, message: str) -> None:
+        retrying = "自动重连" in (message or "")
+        color = theme.WARN if retrying else theme.REC
         self._status_text.setText(message)
         self._status_text.setStyleSheet(
-            f"color: {theme.REC}; font-family: '{theme.mono_family()}'; font-size: 11px;")
+            f"color: {color}; font-family: '{theme.mono_family()}'; font-size: 11px;")
         self._mini_track.setText(message)
         self._np_track.setText(message)
 
@@ -1944,8 +1953,14 @@ class MainWindow(QWidget):
                                  "已最小化到托盘，播放继续。右键托盘图标可操作。")
             return
         # Synchronous teardown: no daemon threads racing interpreter exit.
-        self.engine.shutdown()
-        self.library.save()
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        if QWidget.mouseGrabber() is self:
+            self.releaseMouse()
+        self._rz_edges = Qt.Edge(0)
         if self.tray is not None:
             self.tray.hide()
+        self.engine.shutdown()
+        self.library.save()
         super().closeEvent(event)

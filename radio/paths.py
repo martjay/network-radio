@@ -6,7 +6,7 @@ import sys
 
 APP_NAME = "NetworkRadio"
 APP_TITLE = "BROADCAST"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.2"
 APP_AUTHOR_QQ = "398511660"
 APP_REPO = "https://github.com/martjay/network-radio"
 
@@ -107,11 +107,117 @@ def is_builtin_recordings_dir(path: str) -> bool:
     return any(norm == os.path.normcase(os.path.abspath(item)) for item in aliases)
 
 
+def is_transient_recordings_dir(path: str) -> bool:
+    """True for leftover test/temp folders that must not be treated as a user choice."""
+    if not (path or "").strip():
+        return True
+    if is_builtin_recordings_dir(path):
+        return True
+    import tempfile
+    name = os.path.basename(path.rstrip("\\/"))
+    if name.startswith(("broadcast_rectest_", "bcast_fix_", "bcast_release")):
+        return True
+    try:
+        norm = os.path.normcase(os.path.abspath(path))
+        temp = os.path.normcase(os.path.abspath(tempfile.gettempdir()))
+    except OSError:
+        return False
+    return norm == temp or norm.startswith(temp + os.sep)
+
+
 def recordings_dir(configured: str = "") -> str:
     """Resolve the recordings folder from a stored setting."""
-    if is_builtin_recordings_dir(configured):
+    if is_transient_recordings_dir(configured) or is_builtin_recordings_dir(configured):
         return default_recordings_dir()
     return configured
+
+
+def cache_dir() -> str:
+    """Bounded scratch folder (Qt/ffmpeg leftovers), never recordings."""
+    path = os.path.join(app_dir(), "cache")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+_EPHEMERAL_PREFIXES = ("broadcast_rectest_", "bcast_", "bcast_fix_", "bcast_release")
+_CACHE_MAX_BYTES = 32 * 1024 * 1024
+_CACHE_MAX_AGE_S = 30 * 60
+
+
+def sweep_ephemeral(max_age_s: float = _CACHE_MAX_AGE_S,
+                    max_bytes: int = _CACHE_MAX_BYTES) -> None:
+    """Drop leftover temp dirs and cap the app cache so a long listen cannot fill the disk.
+
+    Live audio itself is only held in a ~0.6 MB memory ring. This janitor is
+    for Qt/ffmpeg temp files and old `--rectest` folders, not the REC library.
+    """
+    import shutil
+    import tempfile
+    import time as _time
+
+    now = _time.time()
+    rec_root = os.path.normcase(os.path.abspath(default_recordings_dir()))
+
+    def _is_rec(path: str) -> bool:
+        try:
+            n = os.path.normcase(os.path.abspath(path))
+        except OSError:
+            return True
+        return n == rec_root or n.startswith(rec_root + os.sep)
+
+    def _age(path: str) -> float:
+        try:
+            return now - os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    def _rm(path: str) -> None:
+        if _is_rec(path):
+            return
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+        except OSError:
+            pass
+
+    for parent in (tempfile.gettempdir(), install_dir(), app_dir()):
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            continue
+        for name in names:
+            if not any(name.startswith(p) for p in _EPHEMERAL_PREFIXES):
+                continue
+            path = os.path.join(parent, name)
+            if _age(path) >= max_age_s:
+                _rm(path)
+
+    cache = cache_dir()
+    files: list[tuple[float, int, str]] = []
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(cache):
+        for fn in filenames:
+            fp = os.path.join(dirpath, fn)
+            try:
+                st = os.stat(fp)
+            except OSError:
+                continue
+            files.append((st.st_mtime, st.st_size, fp))
+            total += st.st_size
+            if now - st.st_mtime >= max_age_s:
+                _rm(fp)
+                total -= st.st_size
+    if total <= max_bytes:
+        return
+    files.sort()  # oldest first
+    for _mtime, size, fp in files:
+        if total <= max_bytes:
+            break
+        if os.path.exists(fp):
+            _rm(fp)
+            total -= size
 
 
 def _resource_root() -> str:

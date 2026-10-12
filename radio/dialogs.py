@@ -612,7 +612,8 @@ class PreferencesDialog(DialogBase):
         lay.addWidget(self._heading("录制"))
 
         stored = (self.library.get("recordings_dir") or "").strip()
-        using_default = paths.is_builtin_recordings_dir(stored)
+        using_default = paths.is_transient_recordings_dir(stored)
+        self._rec_custom_kept = "" if using_default else stored
 
         self._rec_use_default = QRadioButton("使用程序目录下的 REC 文件夹")
         self._rec_custom = QRadioButton("自定义目录")
@@ -623,6 +624,7 @@ class PreferencesDialog(DialogBase):
         self._rec_use_default.setChecked(using_default)
         self._rec_custom.setChecked(not using_default)
         self._rec_use_default.toggled.connect(self._sync_rec_dir_mode)
+        self._rec_custom.toggled.connect(self._sync_rec_dir_mode)
         lay.addWidget(self._rec_use_default)
         rec_path = QLabel(paths.default_recordings_dir())
         rec_path.setFont(theme.font(10, 400, mono=True))
@@ -637,13 +639,14 @@ class PreferencesDialog(DialogBase):
         self._rec_dir.setPlaceholderText("选择一个文件夹")
         self._rec_browse = IconButton("folder", 28, 15, "选择目录", color=theme.TEXT_DIM)
         self._rec_browse.clicked.connect(self._choose_dir)
-        row = QWidget()
-        rl = QHBoxLayout(row)
+        self._rec_dir_row = QWidget()
+        rl = QHBoxLayout(self._rec_dir_row)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(8)
         rl.addWidget(self._rec_dir, 1)
         rl.addWidget(self._rec_browse)
-        lay.addWidget(self._indented(row))
+        self._rec_dir_wrap = self._indented(self._rec_dir_row)
+        lay.addWidget(self._rec_dir_wrap)
         self._sync_rec_dir_mode()
 
         fmt = self._combo([(label, key) for key, label in RECORD_FORMATS],
@@ -672,8 +675,9 @@ class PreferencesDialog(DialogBase):
             info.setWordWrap(True)
         lay.addWidget(info)
         lay.addWidget(self._hint(
-            "MP3 / AAC 选项直接复制原始数据流，不做二次编码，音质与电台播出完全一致；"
-            "选择其它格式时会按上面的码率转码。"
+            "MP3 / AAC（原流复制）直接写入电台原始数据，音质与播出一致。"
+            "M4A 是带 AAC 编码的 .m4a 文件，会按上面的码率转码；"
+            "OGG / FLAC / WAV 同样需要转码。"
         ))
         lay.addStretch(1)
         return page
@@ -854,15 +858,25 @@ class PreferencesDialog(DialogBase):
         QTimer.singleShot(2200, lambda: self._flash_label.setText(""))
 
     # -- actions -----------------------------------------------------------
-    def _sync_rec_dir_mode(self) -> None:
+    def _sync_rec_dir_mode(self, _checked: bool = False) -> None:
         custom = self._rec_custom.isChecked()
+        if custom:
+            if not self._rec_dir.text().strip() and self._rec_custom_kept:
+                self._rec_dir.setText(self._rec_custom_kept)
+        else:
+            kept = self._rec_dir.text().strip()
+            if kept and not paths.is_transient_recordings_dir(kept):
+                self._rec_custom_kept = kept
+            self._rec_dir.clear()
         self._rec_dir.setEnabled(custom)
         self._rec_browse.setEnabled(custom)
+        self._rec_dir_wrap.setVisible(custom)
 
     def _choose_dir(self) -> None:
         start = self._rec_dir.text().strip() or paths.default_recordings_dir()
         chosen = QFileDialog.getExistingDirectory(self, "选择录音保存目录", start)
         if chosen:
+            self._rec_custom_kept = chosen
             self._rec_custom.setChecked(True)
             self._rec_dir.setText(chosen)
             self._sync_rec_dir_mode()
@@ -891,8 +905,8 @@ class PreferencesDialog(DialogBase):
         if self._rec_use_default.isChecked():
             rec_dir_text = ""
         else:
-            rec_dir_text = self._rec_dir.text().strip()
-            if paths.is_builtin_recordings_dir(rec_dir_text):
+            rec_dir_text = self._rec_dir.text().strip() or self._rec_custom_kept
+            if paths.is_transient_recordings_dir(rec_dir_text):
                 rec_dir_text = ""
         self.library.set("recordings_dir", rec_dir_text, save=False)
         self.library.set("record_format", self._rec_fmt.currentData() or "mp3", save=False)

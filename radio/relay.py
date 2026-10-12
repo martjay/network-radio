@@ -44,8 +44,12 @@ class _Ring:
         self._dropped = 0
         self._write_timeout = write_timeout
 
-    def write(self, data: bytes) -> None:
-        deadline = time.monotonic() + self._write_timeout
+    def write(self, data: bytes, *, may_drop: bool = True) -> None:
+        # While the decoder is attached, dropping bytes punches a hole in AAC
+        # (and some MP3) streams and Qt reports ResourceError. Block instead,
+        # so backpressure goes to the upstream socket.
+        wait = self._write_timeout if may_drop else 120.0
+        deadline = time.monotonic() + wait
         with self._cv:
             while not self._closed and len(self._buf) + len(data) > self._cap:
                 remaining = deadline - time.monotonic()
@@ -116,6 +120,7 @@ class Relay:
         self._server_thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._clients = 0
+        self._http_gen = 0
         self._upstream_ready = threading.Event()
         self._pump_bytes = 0
         self._marked = False
@@ -177,26 +182,39 @@ class Relay:
     def stop(self) -> None:
         self._stop.set()
         self._ring.close()
-        if self._server is not None:
+        # Unblock the pump (ffmpeg/socket read) before joining threads or
+        # shutting the HTTP server, which can otherwise wait on each other.
+        if self.reader is not None:
             try:
-                self._server.shutdown()
-                self._server.server_close()
+                self.reader.close()
             except Exception:  # noqa: BLE001
                 pass
-        if self.reader is not None:
-            self.reader.close()
+            self.reader = None
+        if self._server is not None:
+            def _shut_http() -> None:
+                try:
+                    self._server.shutdown()
+                    self._server.server_close()
+                except Exception:  # noqa: BLE001
+                    pass
+            t = threading.Thread(target=_shut_http, name="relay-http-stop", daemon=True)
+            t.start()
+            t.join(timeout=1.0)
         if self._shim is not None:
-            self._shim.stop()
+            try:
+                self._shim.stop()
+            except Exception:  # noqa: BLE001
+                pass
             self._shim = None
         for th in (self._pump, self._server_thread):
             if th is not None and th.is_alive():
-                th.join(timeout=1.5)
+                th.join(timeout=0.8)
 
     # ------------------------------------------------------------------ #
     #  upstream pump
     # ------------------------------------------------------------------ #
     def _pump_loop(self) -> None:
-        idle = 0
+        idle_since = 0.0
         try:
             while not self._stop.is_set():
                 try:
@@ -205,17 +223,23 @@ class Relay:
                     self.error = str(exc)
                     break
                 if not data:
-                    idle += 1
                     if self.reader is not None and self.reader.now_playing:
                         self.now_playing = self.reader.now_playing
-                    if idle > 3:
+                    # True EOF only. A short empty read used to kill the pump
+                    # after ~200 ms, which looks like a random ResourceError.
+                    if getattr(self.reader, "_eof", False):
+                        self.error = self.error or "stream ended"
+                        break
+                    if idle_since == 0.0:
+                        idle_since = time.monotonic()
+                    elif time.monotonic() - idle_since > 45.0:
                         self.error = self.error or "stream ended"
                         break
                     time.sleep(0.05)
                     continue
-                idle = 0
+                idle_since = 0.0
                 self._upstream_ready.set()
-                self._ring.write(data)
+                self._ring.write(data, may_drop=self._clients <= 0)
                 self._pump_bytes += len(data)
                 if len(self._head) < self._head_limit:
                     self._head += data
@@ -367,20 +391,24 @@ class Relay:
                 if not self.path.startswith("/stream"):
                     self.send_error(404)
                     return
-                relay._clients += 1
+                with relay._lock:
+                    relay._http_gen += 1
+                    my_gen = relay._http_gen
+                    relay._clients += 1
                 relay.client_connected = True
                 try:
                     self.send_response(200)
                     self.send_header("Content-Type", relay.content_type or "audio/mpeg")
                     self.send_header("Cache-Control", "no-store")
+                    self.send_header("Pragma", "no-cache")
                     self.send_header("Connection", "close")
                     self.end_headers()
                     self.wfile.flush()
                     relay._upstream_ready.wait(timeout=8.0)
-                    while not relay._stop.is_set():
+                    while not relay._stop.is_set() and my_gen == relay._http_gen:
                         chunk = relay._ring.read(CHUNK, timeout=6.0)
                         if not chunk:
-                            if relay._stop.is_set():
+                            if relay._stop.is_set() or my_gen != relay._http_gen:
                                 break
                             if relay.error:
                                 break

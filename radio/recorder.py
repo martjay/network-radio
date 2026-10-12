@@ -47,6 +47,48 @@ def ffmpeg_available() -> bool:
     return ffmpeg_path() is not None
 
 
+_encoder_cache: set[str] | None = None
+
+
+def ffmpeg_encoders() -> set[str]:
+    """Names reported by `ffmpeg -encoders` (cached)."""
+    global _encoder_cache
+    if _encoder_cache is not None:
+        return _encoder_cache
+    exe = ffmpeg_path()
+    if not exe:
+        _encoder_cache = set()
+        return _encoder_cache
+    try:
+        p = subprocess.run(
+            [exe, "-hide_banner", "-encoders"],
+            capture_output=True, timeout=8, creationflags=CREATE_NO_WINDOW,
+        )
+        names: set[str] = set()
+        for line in p.stdout.decode("utf-8", "replace").splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2 and len(parts[0]) >= 5:
+                names.add(parts[1])
+        _encoder_cache = names
+    except Exception:  # noqa: BLE001
+        _encoder_cache = set()
+    return _encoder_cache
+
+
+def ffmpeg_audio_pipe_args(bitrate_kbps: int = 192) -> tuple[list[str], str]:
+    """Args that write a Qt-playable audio elementary stream to stdout."""
+    encoders = ffmpeg_encoders()
+    rate = max(64, int(bitrate_kbps) or 192)
+    if "libmp3lame" in encoders:
+        return (["-c:a", "libmp3lame", "-b:a", f"{rate}k", "-f", "mp3"],
+                "audio/mpeg")
+    if "aac" in encoders:
+        return (["-c:a", "aac", "-b:a", f"{rate}k", "-f", "adts"],
+                "audio/aac")
+    return (["-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", "-f", "wav"],
+            "audio/wav")
+
+
 # container -> (extension, muxer, codec)
 CONTAINERS = {
     "mp3": ("mp3", "mp3", "copy"),
@@ -90,7 +132,7 @@ FORMAT_LABELS = {
 RECORD_FORMATS = [
     ("mp3", "MP3（原流复制）"),
     ("aac", "AAC（原流复制）"),
-    ("m4a", "M4A / AAC"),
+    ("m4a", "M4A（AAC 转码）"),
     ("ogg", "OGG Vorbis"),
     ("flac", "FLAC 无损"),
     ("wav", "WAV 无损"),
@@ -462,7 +504,7 @@ class Recorder:
         except Exception:  # noqa: BLE001
             pass
 
-    def stop(self) -> str:
+    def stop(self, timeout: float = 12.0) -> str:
         with self._lock:
             proc, self._proc = self._proc, None
             pending = bytes(self._first)
@@ -484,11 +526,14 @@ class Recorder:
         except Exception:  # noqa: BLE001
             pass
         try:
-            proc.wait(timeout=12)
+            proc.wait(timeout=max(0.4, float(timeout)))
         except subprocess.TimeoutExpired:
-            proc.kill()
             try:
-                proc.wait(timeout=3)
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                proc.wait(timeout=1.5)
             except Exception:  # noqa: BLE001
                 pass
         self._collect_error()

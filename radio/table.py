@@ -11,7 +11,7 @@ import time
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal,
 )
-from PySide6.QtGui import QBrush, QFontMetrics, QLinearGradient, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QFontMetrics, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView, QHeaderView, QStyle, QStyledItemDelegate, QTreeView,
 )
@@ -97,32 +97,9 @@ class StationModel(QAbstractTableModel):
                 br = int(row.get("bitrate") or 0)
                 return f"{br}k" if br else "--"
             return ""
-        if role == Qt.ItemDataRole.ToolTipRole:
-            return self._tooltip(row)
         if role == Qt.ItemDataRole.TextAlignmentRole and col in (COL_RATE, COL_CODEC):
             return int(Qt.AlignmentFlag.AlignCenter)
         return None
-
-    @staticmethod
-    def _tooltip(row: dict) -> str:
-        parts = [row.get("name", "")]
-        meta = []
-        if row.get("country"):
-            meta.append(row["country"])
-        if row.get("state"):
-            meta.append(row["state"])
-        if row.get("codec"):
-            meta.append(row["codec"])
-        if row.get("bitrate"):
-            meta.append(f"{row['bitrate']} kbps")
-        if row.get("sample_rate"):
-            meta.append(f"{row['sample_rate']} Hz")
-        if meta:
-            parts.append(" · ".join(meta))
-        if row.get("tags"):
-            parts.append(row["tags"])
-        parts.append(row.get("url", ""))
-        return "\n".join(parts)
 
     # -- data plumbing -----------------------------------------------------
     def set_rows(self, rows: list[dict]) -> None:
@@ -180,17 +157,14 @@ class StationDelegate(QStyledItemDelegate):
         is_loading = row.get("url") == self.model.loading_url
 
         # ---- background ------------------------------------------------
-        if selected:
+        # One wash for the whole row. A per-cell accent bar used to sit on
+        # every column edge and read as a fat divider through the live row.
+        if is_playing:
+            painter.fillRect(rect, theme.c(theme.ACCENT, 0.07))
+        elif selected:
             painter.fillRect(rect, theme.c(theme.BG_ROW_SEL))
-            painter.fillRect(rect.left(), rect.top(), 2, rect.height(), theme.c(theme.ACCENT))
         elif hovered:
             painter.fillRect(rect, theme.c(theme.BG_ROW_HOVER))
-
-        if is_playing:
-            grad = QLinearGradient(rect.left(), 0, rect.left() + 150, 0)
-            grad.setColorAt(0.0, theme.c(theme.ACCENT, 0.10))
-            grad.setColorAt(1.0, theme.c(theme.ACCENT, 0.0))
-            painter.fillRect(rect, QBrush(grad))
 
         # ---- bottom hairline -------------------------------------------
         painter.setPen(QPen(theme.c(theme.STROKE_SOFT), 1))

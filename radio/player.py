@@ -22,6 +22,8 @@ from .recorder import Recorder
 from .relay import Relay
 
 VOLUME_CURVE_EXP = 2.2  # perceptual taper for the volume slider
+_RETRY_DELAYS = (2, 3, 5, 8, 12, 18, 25, 30)
+_RETRYABLE_ERRORS = {"ResourceError", "NetworkError"}
 
 
 def slider_to_linear(pos: int) -> float:
@@ -91,10 +93,23 @@ class PlayerEngine(QObject):
         self._generation = 0
         self._connect_thread: threading.Thread | None = None
         self._want_playing = False
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._on_retry)
+        self._retry_count = 0
+        self._awaiting_retry = False
+        self._retry_station: dict = {}
+        self._retry_resume_rec = False
+        self._cache_timer = QTimer(self)
+        self._cache_timer.setInterval(5 * 60 * 1000)
+        self._cache_timer.timeout.connect(self._sweep_cache)
+        self._cache_timer.start()
+        QTimer.singleShot(2500, self._sweep_cache)
 
         self._recorder: Recorder | None = None
         self._recording = False
         self._rec_path = ""
+        self._shutting_down = False
 
         self._window = np.hanning(self.FFT).astype(np.float32)
         self._prev_bands = np.zeros(self.BANDS, dtype=np.float32)
@@ -114,11 +129,16 @@ class PlayerEngine(QObject):
     # ------------------------------------------------------------------ #
     #  public API
     # ------------------------------------------------------------------ #
-    def tune(self, station: dict) -> None:
+    def tune(self, station: dict, *, from_retry: bool = False) -> None:
         """Begin playing `station` (dict from the catalogue)."""
         if not station:
             return
-        self.stop(keep_station=False)
+        resume_rec = self._retry_resume_rec if from_retry else False
+        retry_n = self._retry_count if from_retry else 0
+        self.stop(keep_station=False, from_retry=from_retry)
+        if from_retry:
+            self._retry_count = retry_n
+            self._retry_resume_rec = resume_rec
         self._generation += 1
         gen = self._generation
         self.station = dict(station)
@@ -128,11 +148,12 @@ class PlayerEngine(QObject):
         self._last_title = ""
         self._last_icy = ""
         self._want_playing = True
+        self._awaiting_retry = False
         self._set_state("connecting")
 
         url = station.get("url", "")
         rec_dir = paths.recordings_dir(self.settings.get("recordings_dir") or "")
-        want_rec = bool(self.settings.get("auto_record", False))
+        want_rec = bool(self.settings.get("auto_record", False)) or resume_rec
 
         def work():
             relay = Relay(url, station_id=station.get("id", ""), proxy=self.proxy)
@@ -155,7 +176,15 @@ class PlayerEngine(QObject):
         self._connect_thread = threading.Thread(target=work, name="tune", daemon=True)
         self._connect_thread.start()
 
-    def stop(self, keep_station: bool = True) -> None:
+    def stop(self, keep_station: bool = True, from_retry: bool = False) -> None:
+        if self._shutting_down:
+            return
+        if not from_retry:
+            self._retry_timer.stop()
+            self._retry_count = 0
+            self._awaiting_retry = False
+            self._retry_station = {}
+            self._retry_resume_rec = False
         self._want_playing = False
         self._generation += 1
         self._player.stop()
@@ -185,15 +214,31 @@ class PlayerEngine(QObject):
         a daemon thread touching half-destroyed modules is a classic source
         of random crashes-on-quit in frozen builds.
         """
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        self._retry_timer.stop()
+        self._cache_timer.stop()
         self._want_playing = False
         self._generation += 1
         self._meta_watch.stop()
         self._stats_timer.stop()
         try:
+            self._abo.audioBufferReceived.disconnect(self._on_audio_buffer)
+        except (RuntimeError, TypeError):
+            pass
+        try:
             self._player.stop()
             self._player.setSource(QUrl())
         except RuntimeError:
             pass  # underlying Qt object already gone (aboutToQuit path)
+        try:
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+        except Exception:  # noqa: BLE001
+            pass
         with self._relay_lock:
             relay, self._relay = self._relay, None
         if relay is not None:
@@ -203,7 +248,7 @@ class PlayerEngine(QObject):
                 pass
         try:
             if self._recording or self._recorder is not None:
-                self.stop_recording()
+                self.stop_recording(timeout=1.5)
         except Exception:  # noqa: BLE001
             pass
         if self.state != "idle":
@@ -277,7 +322,7 @@ class PlayerEngine(QObject):
         self.recording_changed.emit(True, rec.path)
         return True
 
-    def stop_recording(self) -> str:
+    def stop_recording(self, timeout: float = 12.0) -> str:
         rec, self._recorder = self._recorder, None
         with self._relay_lock:
             if self._relay is not None:
@@ -287,11 +332,12 @@ class PlayerEngine(QObject):
         if rec is None:
             self.recording_changed.emit(False, "")
             return ""
-        path = rec.stop()
+        path = rec.stop(timeout=timeout)
         if not path:
             # Nothing usable was written; surface why instead of reporting a
             # saved file that does not exist.
-            self.error_occurred.emit(rec.error or "录制失败：没有写入任何音频数据")
+            if not self._shutting_down:
+                self.error_occurred.emit(rec.error or "录制失败：没有写入任何音频数据")
             self.recording_changed.emit(False, "")
             return ""
         self.recording_changed.emit(False, path)
@@ -324,7 +370,11 @@ class PlayerEngine(QObject):
     def _on_connect_failed(self, gen: int, message: str) -> None:
         if gen != self._generation:
             return
-        self._fail(self._friendly_error(message))
+        text = self._friendly_error(message)
+        if self._want_playing and self.station:
+            self._schedule_retry(text)
+            return
+        self._fail(text)
 
     def _friendly_error(self, message: str) -> str:
         low = (message or "").lower()
@@ -370,6 +420,8 @@ class PlayerEngine(QObject):
         if name in ("BufferedMedia", "LoadedMedia"):
             if self.state != "playing":
                 self._set_state("playing")
+            self._retry_count = 0
+            self._retry_resume_rec = False
         elif name == "BufferingMedia":
             if self.state == "playing":
                 self._set_state("buffering")
@@ -378,37 +430,82 @@ class PlayerEngine(QObject):
         elif name == "StalledMedia":
             self._set_state("buffering")
         elif name == "EndOfMedia":
-            # live streams occasionally report EOS on reconnect; retry once
-            if self._want_playing and self._relay is not None:
-                self._player.setPosition(0)
-                self._player.play()
+            # Live streams report EOS when the upstream socket closes.
+            # Reconnect instead of looping a dead loopback URL.
+            if self._want_playing and self.station:
+                self._schedule_retry("直播流中断")
         elif name == "InvalidMedia":
             if self._want_playing:
                 self._set_state("error")
                 self.error_occurred.emit("媒体无法解码，请尝试其它电台")
 
     def _on_error(self, error, message: str) -> None:
-        if not self._want_playing:
+        if not self._want_playing or self._awaiting_retry:
             return
         if error == QMediaPlayer.Error.NoError:
             return
-        self._set_state("error")
         text = {
             "ResourceError": "无法打开音频流（网络或服务器拒绝）",
             "FormatError": "音频格式不受支持",
             "NetworkError": "网络中断",
             "AccessDeniedError": "访问被拒绝",
         }.get(error.name, f"播放错误：{message or error.name}")
+        if error.name in _RETRYABLE_ERRORS and self.station:
+            self._schedule_retry(text)
+            return
+        self._set_state("error")
         self.error_occurred.emit(text)
+
+    def _schedule_retry(self, reason: str) -> None:
+        """Reconnect the current station after a transient drop."""
+        if not self._want_playing or self._awaiting_retry:
+            return
+        station = dict(self.station) if self.station else {}
+        if not station:
+            self._fail(reason)
+            return
+        self._awaiting_retry = True
+        self._retry_resume_rec = self._recording or self._retry_resume_rec
+        self._retry_station = station
+        delay = _RETRY_DELAYS[min(self._retry_count, len(_RETRY_DELAYS) - 1)]
+        self._retry_count += 1
+        self._set_state("connecting")
+        self.error_occurred.emit(
+            f"{reason}，{delay} 秒后自动重连（第 {self._retry_count} 次）")
+        # Tear the dead transport down without clearing the listen intent.
+        try:
+            self._player.stop()
+            self._player.setSource(QUrl())
+        except RuntimeError:
+            pass
+        with self._relay_lock:
+            relay, self._relay = self._relay, None
+        if relay is not None:
+            threading.Thread(target=relay.stop, daemon=True).start()
+        if self._recording:
+            self.stop_recording()
+        self._retry_timer.start(int(delay * 1000))
+
+    def _on_retry(self) -> None:
+        station = dict(self._retry_station) if self._retry_station else dict(self.station or {})
+        if not self._want_playing or not station:
+            self._awaiting_retry = False
+            return
+        self.tune(station, from_retry=True)
+
+    def _sweep_cache(self) -> None:
+        try:
+            paths.sweep_ephemeral()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _poll_metadata(self) -> None:
         with self._relay_lock:
             relay = self._relay
         if relay is None:
             return
-        if relay.error and self._want_playing and self.state == "playing":
-            self._set_state("error")
-            self.error_occurred.emit(relay.error)
+        if relay.error and self._want_playing and not self._awaiting_retry:
+            self._schedule_retry(relay.error or "上游连接中断")
             return
         title = relay.now_playing
         if title and title != getattr(self, "_last_title", ""):
