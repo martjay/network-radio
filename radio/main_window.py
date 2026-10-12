@@ -771,6 +771,7 @@ class MainWindow(QWidget):
         self.engine.buffer_health.connect(self._buffer_bar.set_value)
         self.library.favorites_changed.connect(self._on_favorites_changed)
         self.library.custom_changed.connect(lambda: self._apply_filters())
+        self.library.catalogue_changed.connect(lambda: self._apply_filters())
         self.library.history_changed.connect(self._refresh_sidebar_counts)
 
         # shortcuts

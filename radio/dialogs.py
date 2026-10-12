@@ -280,6 +280,7 @@ class PreferencesDialog(DialogBase):
         self.engine = engine
         self._reset_done = False
         self._proxy_test_thread = None
+        self._cat_thread = None
 
         content = QHBoxLayout()
         content.setContentsMargins(0, 0, 0, 0)
@@ -757,9 +758,48 @@ class PreferencesDialog(DialogBase):
             ("自建电台", f"{stats['custom']} 个"),
             ("收藏", f"{stats['favorites']} 个"),
             ("覆盖国家", f"{stats['countries']} 个"),
-            ("电台库更新", stats.get("generated") or "--"),
         ]:
             lay.addWidget(KeyValueRow(key, value))
+        self._cat_date = KeyValueRow("电台库更新", stats.get("generated") or "--")
+        lay.addWidget(self._cat_date)
+
+        sync_row = QWidget()
+        sl = QHBoxLayout(sync_row)
+        sl.setContentsMargins(0, 4, 0, 0)
+        sl.setSpacing(8)
+        self._cat_status = QLabel("从 radio-browser 核对内置电台的流地址，有变更才改。")
+        self._cat_status.setFont(theme.font(11, 400))
+        self._cat_status.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        self._cat_status.setWordWrap(True)
+        sl.addWidget(self._cat_status, 1)
+        self._cat_btn = TextButton("更新地址", "refresh")
+        self._cat_btn.clicked.connect(self._sync_catalogue)
+        sl.addWidget(self._cat_btn)
+        lay.addWidget(sync_row)
+        lay.addWidget(self._hint(
+            "内置电台库随安装包固定，不会自动改。点「更新地址」会按电台名和国家"
+            "对照社区数据库，把已经换链的流写进本机（收藏和最近播放会跟着改）。"
+            "真正改地址前会留下最近两次正常列表，可在下面恢复。自建电台请自行编辑。"
+            "需要联网，境外访问请先配好代理。"
+        ))
+
+        self._backup_rows = []
+        self._backup_btns = []
+        for slot, title in ((1, "最近备份"), (2, "再上一份")):
+            row = QWidget()
+            br = QHBoxLayout(row)
+            br.setContentsMargins(0, 0, 0, 0)
+            br.setSpacing(8)
+            kv = KeyValueRow(title, "还没有")
+            kv.set_value("还没有", dim=True)
+            btn = TextButton("恢复", "restore")
+            btn.clicked.connect(lambda _=False, s=slot: self._restore_catalogue(s))
+            br.addWidget(kv, 1)
+            br.addWidget(btn)
+            lay.addWidget(row)
+            self._backup_rows.append(kv)
+            self._backup_btns.append(btn)
+        self._refresh_catalogue_backups()
 
         lay.addWidget(hline(theme.STROKE_SOFT))
 
@@ -810,6 +850,103 @@ class PreferencesDialog(DialogBase):
         lay.addWidget(row)
         lay.addStretch(1)
         return page
+
+    def _sync_catalogue(self) -> None:
+        if self._cat_thread is not None and self._cat_thread.isRunning():
+            return
+        self._cat_btn.setEnabled(False)
+        for btn in self._backup_btns:
+            btn.setEnabled(False)
+        self._cat_status.setStyleSheet(f"color: {theme.TEXT_DIM};")
+        self._cat_status.setText("正在对照社区数据库 … 可能需要一两分钟。")
+
+        class Worker(QThread):
+            done = Signal(dict)
+
+            def __init__(self, stations, proxy):
+                super().__init__()
+                self.stations = stations
+                self.proxy = proxy
+
+            def run(self):
+                from .catalog import collect_url_patches
+                try:
+                    self.done.emit(collect_url_patches(self.stations, proxy=self.proxy))
+                except Exception as exc:  # noqa: BLE001
+                    self.done.emit({
+                        "ok": False, "updated": 0, "checked": 0,
+                        "unmatched": 0, "patches": [], "error": str(exc),
+                    })
+
+        self._cat_thread = Worker(list(self.library.stations), self._current_proxy())
+        self._cat_thread.done.connect(self._on_catalogue_synced)
+        self._cat_thread.start()
+
+    def _on_catalogue_synced(self, result: dict) -> None:
+        self._cat_btn.setEnabled(True)
+        self._refresh_catalogue_backups()
+        if not result.get("ok"):
+            self._cat_status.setStyleSheet(f"color: {theme.REC};")
+            self._cat_status.setText(f"更新失败：{result.get('error') or '未知错误'}")
+            return
+        try:
+            n = self.library.apply_url_patches(result.get("patches") or [])
+        except OSError as exc:
+            self._cat_status.setStyleSheet(f"color: {theme.REC};")
+            self._cat_status.setText(f"备份失败，地址未改动：{exc}")
+            self._refresh_catalogue_backups()
+            return
+        generated = self.library.stats().get("generated") or "--"
+        self._cat_date.set_value(generated)
+        self._refresh_catalogue_backups()
+        self._cat_status.setStyleSheet(f"color: {theme.GOOD};")
+        if n:
+            self._cat_status.setText(
+                f"已更新 {n} 个电台地址，并留下本次改之前的列表备份。"
+            )
+        else:
+            self._cat_status.setText("对照完成，内置电台地址没有变化。")
+
+    def _refresh_catalogue_backups(self) -> None:
+        found = {row["slot"]: row for row in self.library.list_catalogue_backups()}
+        for i, slot in enumerate((1, 2)):
+            row = found.get(slot)
+            btn = self._backup_btns[i]
+            kv = self._backup_rows[i]
+            if not row:
+                kv.set_value("还没有", dim=True)
+                btn.setEnabled(False)
+                continue
+            extra = f"{row['overrides']} 处改址" if row.get("overrides") else "安装包原表"
+            kv.set_value(f"{row['saved_at'] or '--'} · {extra}")
+            btn.setEnabled(True)
+
+    def _restore_catalogue(self, slot: int) -> None:
+        found = {row["slot"]: row for row in self.library.list_catalogue_backups()}
+        row = found.get(slot)
+        if not row:
+            self._cat_status.setStyleSheet(f"color: {theme.WARN};")
+            self._cat_status.setText("这份备份不存在。")
+            self._refresh_catalogue_backups()
+            return
+        label = "最近一次" if slot == 1 else "再上一份"
+        when = row.get("saved_at") or "未知时间"
+        if not confirm(
+            self,
+            "恢复电台列表",
+            f"把内置电台地址恢复为{label}备份（{when}）？收藏和最近播放会按台名对齐到旧地址。",
+        ):
+            return
+        result = self.library.restore_catalogue_backup(slot)
+        if not result.get("ok"):
+            self._cat_status.setStyleSheet(f"color: {theme.REC};")
+            self._cat_status.setText(f"恢复失败：{result.get('error') or '未知错误'}")
+            return
+        generated = self.library.stats().get("generated") or "--"
+        self._cat_date.set_value(generated)
+        self._refresh_catalogue_backups()
+        self._cat_status.setStyleSheet(f"color: {theme.GOOD};")
+        self._cat_status.setText(f"已恢复 {result.get('saved_at') or when} 的电台列表。")
 
     def _copy_qq(self, qq: str) -> None:
         from PySide6.QtWidgets import QApplication

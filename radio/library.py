@@ -7,8 +7,10 @@ atomically.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
+import shutil
 import tempfile
 import time
 
@@ -92,6 +94,7 @@ class Library(QObject):
     custom_changed = Signal()
     history_changed = Signal()
     setting_changed = Signal(str, object)
+    catalogue_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -101,6 +104,7 @@ class Library(QObject):
         self.favorites: list[str] = []          # ordered, most recent first
         self.history: list[dict] = []           # most recent first
         self.play_counts: dict[str, int] = {}
+        self.url_overrides: list[dict] = []
         self.settings: dict = dict(DEFAULTS)
         self._by_url: dict[str, dict] = {}
         self._load_catalogue()
@@ -165,6 +169,7 @@ class Library(QObject):
             self.favorites = data.get("favorites", []) or []
             self.history = data.get("history", []) or []
             self.play_counts = data.get("play_counts", {}) or {}
+            self.url_overrides = data.get("url_overrides", []) or []
             stored = data.get("settings", {}) or {}
             for key, value in stored.items():
                 if key in DEFAULTS:
@@ -182,6 +187,12 @@ class Library(QObject):
             s.setdefault("votes", 0)
             s.setdefault("score", 0.0)
             s.setdefault("zh", False)
+        self._apply_url_overrides(self.url_overrides)
+        self._remap_userdata_urls({
+            o.get("from", ""): o.get("to", "")
+            for o in self.url_overrides
+            if o.get("from") and o.get("to")
+        })
         self._reindex()
 
     def _sanitize_settings(self) -> None:
@@ -199,6 +210,7 @@ class Library(QObject):
                 "favorites": self.favorites,
                 "history": self.history[:400],
                 "play_counts": self.play_counts,
+                "url_overrides": self.url_overrides,
                 "settings": self.settings,
             },
             ensure_ascii=False,
@@ -465,6 +477,163 @@ class Library(QObject):
         if sort == "genre":
             return sorted(rows, key=lambda s: ((s.get("genre") or "zz"), -float(s.get("score") or 0)))
         return sorted(rows, key=lambda s: -float(s.get("score") or 0))
+
+    def _remap_userdata_urls(self, mapping: dict[str, str]) -> None:
+        if not mapping:
+            return
+        self.favorites = [mapping.get(u, u) for u in self.favorites]
+        seen: set[str] = set()
+        favs: list[str] = []
+        for u in self.favorites:
+            if u and u not in seen:
+                seen.add(u)
+                favs.append(u)
+        self.favorites = favs
+        for item in self.history:
+            old = item.get("url", "")
+            if old in mapping:
+                item["url"] = mapping[old]
+        counts: dict[str, int] = {}
+        for url, n in self.play_counts.items():
+            counts[mapping.get(url, url)] = counts.get(mapping.get(url, url), 0) + int(n)
+        self.play_counts = counts
+        last = self.settings.get("last_station", "")
+        if last in mapping:
+            self.settings["last_station"] = mapping[last]
+
+    def _apply_url_overrides(self, overrides: list[dict]) -> None:
+        if not overrides:
+            return
+        by_from = {o.get("from", ""): o for o in overrides if o.get("from")}
+        by_key = {
+            ((o.get("name") or ""), (o.get("cc") or "").upper()): o
+            for o in overrides if o.get("to")
+        }
+        for s in self.stations:
+            patch = by_from.get(s.get("url", "")) or by_key.get(
+                (s.get("name") or "", (s.get("cc") or "").upper())
+            )
+            if not patch:
+                continue
+            new = (patch.get("to") or "").strip()
+            if not new:
+                continue
+            s["url"] = new
+            if patch.get("codec"):
+                s["codec"] = patch["codec"]
+            if patch.get("bitrate"):
+                s["bitrate"] = int(patch["bitrate"])
+            if patch.get("homepage"):
+                s["homepage"] = patch["homepage"]
+
+    def _catalogue_snapshot(self) -> dict:
+        return {
+            "version": 1,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "generated": self.meta.get("generated", ""),
+            "count": len(self.stations),
+            "url_overrides": copy.deepcopy(self.url_overrides),
+        }
+
+    @staticmethod
+    def _backup_paths() -> tuple[str, str]:
+        return (
+            paths.user_file(paths.CATALOGUE_BACKUP_1),
+            paths.user_file(paths.CATALOGUE_BACKUP_2),
+        )
+
+    def backup_catalogue(self) -> dict:
+        """Persist the current builtin list as the newest of two rotating backups."""
+        snap = self._catalogue_snapshot()
+        p1, p2 = self._backup_paths()
+        os.makedirs(os.path.dirname(p1) or ".", exist_ok=True)
+        if os.path.isfile(p1):
+            shutil.copy2(p1, p2)
+        _atomic_write(p1, json.dumps(snap, ensure_ascii=False, indent=1))
+        return snap
+
+    def list_catalogue_backups(self) -> list[dict]:
+        rows = []
+        for slot, path in enumerate(self._backup_paths(), start=1):
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            rows.append({
+                "slot": slot,
+                "path": path,
+                "saved_at": data.get("saved_at") or "",
+                "generated": data.get("generated") or "",
+                "count": int(data.get("count") or 0),
+                "overrides": len(data.get("url_overrides") or []),
+            })
+        return rows
+
+    def restore_catalogue_backup(self, slot: int) -> dict:
+        """Reload bundled stations and apply the chosen backup's URL overlay."""
+        paths_pair = self._backup_paths()
+        if slot not in (1, 2):
+            return {"ok": False, "error": "没有这份备份"}
+        path = paths_pair[slot - 1]
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"ok": False, "error": f"读不了备份：{exc}"}
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "备份文件损坏"}
+        current = {
+            ((s.get("name") or ""), (s.get("cc") or "").upper()): (s.get("url") or "")
+            for s in self.stations
+        }
+        self._load_catalogue()
+        self.url_overrides = copy.deepcopy(data.get("url_overrides") or [])
+        self._apply_url_overrides(self.url_overrides)
+        mapping = {}
+        for s in self.stations:
+            key = ((s.get("name") or ""), (s.get("cc") or "").upper())
+            old = current.get(key, "")
+            new = s.get("url") or ""
+            if old and new and old != new:
+                mapping[old] = new
+        self._remap_userdata_urls(mapping)
+        generated = (data.get("generated") or "").strip()
+        if generated:
+            self.meta["generated"] = generated
+        self._reindex()
+        self.save()
+        self.catalogue_changed.emit()
+        return {
+            "ok": True,
+            "saved_at": data.get("saved_at") or "",
+            "count": len(self.stations),
+        }
+
+    def apply_url_patches(self, patches: list[dict]) -> int:
+        """Apply radio-browser URL patches to builtin stations and persist them."""
+        if not patches:
+            return 0
+        self.backup_catalogue()
+        mapping = {p["from"]: p["to"] for p in patches if p.get("from") and p.get("to")}
+        self._apply_url_overrides(patches)
+        self._remap_userdata_urls(mapping)
+        merged: dict[tuple[str, str], dict] = {
+            ((o.get("name") or ""), (o.get("cc") or "").upper()): o
+            for o in self.url_overrides
+        }
+        for p in patches:
+            merged[((p.get("name") or ""), (p.get("cc") or "").upper())] = p
+        self.url_overrides = list(merged.values())
+        self.meta["generated"] = time.strftime("%Y-%m-%d")
+        self._reindex()
+        self.save()
+        self.catalogue_changed.emit()
+        return len(patches)
 
     def stats(self) -> dict:
         return {
