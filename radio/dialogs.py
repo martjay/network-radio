@@ -6,12 +6,13 @@ import os
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QPushButton, QRadioButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import icons, paths, theme
+from .library import SORT_MODES
 from .recorder import RECORD_FORMATS, ffmpeg_available, ffmpeg_path
 from .widgets import ElideLabel, IconButton, KeyValueRow, TextButton, hline, vline
 
@@ -340,6 +341,14 @@ class PreferencesDialog(DialogBase):
         lab.setStyleSheet(f"color: {theme.TEXT_FAINT};")
         return lab
 
+    def _indented(self, widget: QWidget, left: int = 22) -> QWidget:
+        wrap = QWidget()
+        lay = QHBoxLayout(wrap)
+        lay.setContentsMargins(left, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(widget)
+        return wrap
+
     def _hint(self, text: str) -> QLabel:
         lab = QLabel(text)
         lab.setFont(theme.font(11, 400))
@@ -396,16 +405,11 @@ class PreferencesDialog(DialogBase):
             ("关闭", 0), ("15 分钟", 15), ("30 分钟", 30),
             ("45 分钟", 45), ("60 分钟", 60), ("90 分钟", 90), ("120 分钟", 120),
         ], int(self.library.get("sleep_minutes", 0)))
-        sleep_combo.currentIndexChanged.connect(
-            lambda: self.library.set("sleep_minutes", sleep_combo.currentData())
-        )
         self._sleep_combo = sleep_combo
         lay.addWidget(self._row("定时关闭", sleep_combo))
         action = self._combo([("停止播放", "stop"), ("关闭程序", "quit")],
                              self.library.get("sleep_action", "stop"))
-        action.currentIndexChanged.connect(
-            lambda: self.library.set("sleep_action", action.currentData())
-        )
+        self._sleep_action = action
         lay.addWidget(self._row("到时动作", action))
         lay.addWidget(self._hint("定时器在开始播放后计时，重新选台不会重置。"))
         lay.addStretch(1)
@@ -540,11 +544,15 @@ class PreferencesDialog(DialogBase):
                 self._sys_label.setStyleSheet(f"color: {theme.WARN};")
 
     def _current_proxy(self):
-        from .proxy import MODE_CUSTOM, ProxyConfig
+        from .proxy import MODE_CUSTOM, MODE_NONE, MODE_SYSTEM, ProxyConfig, system_proxy
 
         mode = self._proxy_mode.currentData()
+        if mode == MODE_NONE:
+            return ProxyConfig(MODE_NONE)
         if mode != MODE_CUSTOM:
-            return self.library.proxy_config() if mode == "system" else ProxyConfig(mode)
+            cfg = system_proxy()
+            cfg.mode = MODE_SYSTEM
+            return cfg
         try:
             port = int(self._proxy_port.text().strip() or 0)
         except ValueError:
@@ -602,26 +610,50 @@ class PreferencesDialog(DialogBase):
     def _page_recording(self) -> QWidget:
         page, lay = self._page()
         lay.addWidget(self._heading("录制"))
-        self._rec_dir = QLineEdit(self.library.get("recordings_dir") or paths.default_recordings_dir())
+
+        stored = (self.library.get("recordings_dir") or "").strip()
+        using_default = paths.is_builtin_recordings_dir(stored)
+
+        self._rec_use_default = QRadioButton("使用程序目录下的 REC 文件夹")
+        self._rec_custom = QRadioButton("自定义目录")
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        group.addButton(self._rec_use_default)
+        group.addButton(self._rec_custom)
+        self._rec_use_default.setChecked(using_default)
+        self._rec_custom.setChecked(not using_default)
+        self._rec_use_default.toggled.connect(self._sync_rec_dir_mode)
+        lay.addWidget(self._rec_use_default)
+        rec_path = QLabel(paths.default_recordings_dir())
+        rec_path.setFont(theme.font(10, 400, mono=True))
+        rec_path.setStyleSheet(f"color: {theme.TEXT_FAINT};")
+        rec_path.setWordWrap(True)
+        rec_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self._indented(rec_path))
+        lay.addWidget(self._rec_custom)
+
+        self._rec_dir = QLineEdit("" if using_default else stored)
         self._rec_dir.setObjectName("Field")
-        browse = IconButton("folder", 28, 15, "选择目录", color=theme.TEXT_DIM)
-        browse.clicked.connect(self._choose_dir)
+        self._rec_dir.setPlaceholderText("选择一个文件夹")
+        self._rec_browse = IconButton("folder", 28, 15, "选择目录", color=theme.TEXT_DIM)
+        self._rec_browse.clicked.connect(self._choose_dir)
         row = QWidget()
         rl = QHBoxLayout(row)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(8)
         rl.addWidget(self._rec_dir, 1)
-        rl.addWidget(browse)
-        lay.addWidget(self._row("保存目录", row))
+        rl.addWidget(self._rec_browse)
+        lay.addWidget(self._indented(row))
+        self._sync_rec_dir_mode()
 
         fmt = self._combo([(label, key) for key, label in RECORD_FORMATS],
                           self.library.get("record_format", "mp3"))
-        fmt.currentIndexChanged.connect(lambda: self.library.set("record_format", fmt.currentData()))
+        self._rec_fmt = fmt
         lay.addWidget(self._row("格式", fmt))
 
         br = self._combo([("128 kbps", 128), ("192 kbps", 192), ("256 kbps", 256), ("320 kbps", 320)],
                          int(self.library.get("record_bitrate", 192)))
-        br.currentIndexChanged.connect(lambda: self.library.set("record_bitrate", br.currentData()))
+        self._rec_br = br
         lay.addWidget(self._row("转码码率", br, "仅对需要转码的格式生效"))
 
         self._auto_rec = QCheckBox("每次开始播放时自动录制")
@@ -650,17 +682,15 @@ class PreferencesDialog(DialogBase):
         page, lay = self._page()
         lay.addWidget(self._heading("界面"))
         sort = self._combo(
-            [(label, key) for key, label in [
-                ("推荐排序", "score"), ("听众投票", "votes"), ("音质优先", "bitrate"),
-                ("名称 A-Z", "name"), ("国家地区", "country"), ("类型", "genre"),
-            ]], self.library.get("sort", "score"))
-        sort.currentIndexChanged.connect(lambda: self.library.set("sort", sort.currentData()))
+            [(label, key) for key, label in SORT_MODES],
+            self.library.get("sort", "score"))
+        self._sort_combo = sort
         lay.addWidget(self._row("默认排序", sort))
 
         mb = self._combo([("不限", 0), ("≥ 64 kbps", 64), ("≥ 128 kbps", 128),
                           ("≥ 192 kbps", 192), ("≥ 256 kbps", 256)],
                          int(self.library.get("min_bitrate", 0)))
-        mb.currentIndexChanged.connect(lambda: self.library.set("min_bitrate", mb.currentData()))
+        self._min_bitrate = mb
         lay.addWidget(self._row("最低码率", mb))
 
         self._zh = QCheckBox("只显示中文电台")
@@ -675,6 +705,9 @@ class PreferencesDialog(DialogBase):
         self._tray_close = QCheckBox("关闭窗口时最小化到托盘（不退出程序）")
         self._tray_close.setChecked(bool(self.library.get("close_to_tray", True)))
         lay.addWidget(self._tray_close)
+        self._tray_min = QCheckBox("最小化窗口时隐藏到托盘")
+        self._tray_min.setChecked(bool(self.library.get("minimize_to_tray", False)))
+        lay.addWidget(self._tray_min)
         self._tray_notify = QCheckBox("最小化到托盘时显示提示")
         self._tray_notify.setChecked(bool(self.library.get("tray_notifications", True)))
         lay.addWidget(self._tray_notify)
@@ -783,11 +816,11 @@ class PreferencesDialog(DialogBase):
         """Recording directory, created if possible, with a writable fallback."""
         from .main_window import _ensure_dir
 
-        wanted = self.library.get("recordings_dir") or paths.default_recordings_dir()
+        wanted = paths.recordings_dir(self.library.get("recordings_dir") or "")
         if _ensure_dir(wanted):
             return wanted
         fallback = os.path.join(paths.app_dir(), "recordings")
-        return fallback if _ensure_dir(fallback) else wanted
+        return fallback if fallback != wanted and _ensure_dir(fallback) else wanted
 
     def _open_path(self, path: str) -> None:
         from .main_window import _reveal_in_file_manager
@@ -821,11 +854,18 @@ class PreferencesDialog(DialogBase):
         QTimer.singleShot(2200, lambda: self._flash_label.setText(""))
 
     # -- actions -----------------------------------------------------------
+    def _sync_rec_dir_mode(self) -> None:
+        custom = self._rec_custom.isChecked()
+        self._rec_dir.setEnabled(custom)
+        self._rec_browse.setEnabled(custom)
+
     def _choose_dir(self) -> None:
-        start = self._rec_dir.text() or paths.default_recordings_dir()
+        start = self._rec_dir.text().strip() or paths.default_recordings_dir()
         chosen = QFileDialog.getExistingDirectory(self, "选择录音保存目录", start)
         if chosen:
+            self._rec_custom.setChecked(True)
             self._rec_dir.setText(chosen)
+            self._sync_rec_dir_mode()
 
     def _reset(self) -> None:
         if QMessageBox.question(
@@ -847,11 +887,25 @@ class PreferencesDialog(DialogBase):
         self.library.set("resume_last", self._resume.isChecked(), save=False)
         self.library.set("notify_track", self._notify.isChecked(), save=False)
         self.library.set("show_spectrum", self._spectrum.isChecked(), save=False)
-        self.library.set("recordings_dir", self._rec_dir.text().strip(), save=False)
+        # Empty recordings_dir means "follow the REC folder next to the exe".
+        if self._rec_use_default.isChecked():
+            rec_dir_text = ""
+        else:
+            rec_dir_text = self._rec_dir.text().strip()
+            if paths.is_builtin_recordings_dir(rec_dir_text):
+                rec_dir_text = ""
+        self.library.set("recordings_dir", rec_dir_text, save=False)
+        self.library.set("record_format", self._rec_fmt.currentData() or "mp3", save=False)
+        self.library.set("record_bitrate", int(self._rec_br.currentData() or 192), save=False)
         self.library.set("auto_record", self._auto_rec.isChecked(), save=False)
+        self.library.set("sleep_minutes", int(self._sleep_combo.currentData() or 0), save=False)
+        self.library.set("sleep_action", self._sleep_action.currentData() or "stop", save=False)
+        self.library.set("sort", self._sort_combo.currentData() or "score", save=False)
+        self.library.set("min_bitrate", int(self._min_bitrate.currentData() or 0), save=False)
         self.library.set("zh_only", self._zh.isChecked(), save=False)
         self.library.set("favorites_only", self._fav.isChecked(), save=False)
         self.library.set("close_to_tray", self._tray_close.isChecked(), save=False)
+        self.library.set("minimize_to_tray", self._tray_min.isChecked(), save=False)
         self.library.set("tray_notifications", self._tray_notify.isChecked(), save=False)
         self.library.save()
 

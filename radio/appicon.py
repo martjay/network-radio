@@ -77,18 +77,29 @@ def _render(size: int, color: str = theme.ACCENT) -> QPixmap:
     return pm
 
 
-def tray_icon() -> QIcon:
-    """Tray icons are shown small, so they use a tighter inset."""
+_tray_icon_cache: dict[str, QIcon] = {}
+
+
+def tray_icon(color: str = theme.ACCENT) -> QIcon:
+    """Tray icons are shown small, so they use a tighter inset.
+
+    The colour is cached per variant so the tray can switch between the
+    "playing" (accent) and "idle" (muted) marks without re-rasterising.
+    """
+    cached = _tray_icon_cache.get(color)
+    if cached is not None:
+        return cached
     icon = QIcon()
     for size in (16, 20, 24, 32, 48, 64):
         pm = QPixmap(size, size)
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        mark = icons.brand_pixmap(size, theme.ACCENT, dpr=1)
+        mark = icons.brand_pixmap(size, color, dpr=1)
         p.drawPixmap(0, 0, mark)
         p.end()
         icon.addPixmap(pm, QIcon.Mode.Normal, QIcon.State.Off)
+    _tray_icon_cache[color] = icon
     return icon
 
 

@@ -53,6 +53,10 @@ class ElideLabel(QLabel):
         super().__init__(parent)
         self._full = text
         self._mode = mode
+        # Ignored + a tiny hint: never fight the layout with the unelided
+        # string width, which used to make the now-playing bar oscillate.
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(24)
         super().setText(text)
 
     def setText(self, text: str) -> None:  # noqa: N802
@@ -63,6 +67,12 @@ class ElideLabel(QLabel):
     def fullText(self) -> str:  # noqa: N802
         return self._full
 
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(24, super().sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(24, super().minimumSizeHint().height())
+
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)
         self._apply()
@@ -70,10 +80,9 @@ class ElideLabel(QLabel):
     def _apply(self) -> None:
         fm = QFontMetrics(self.font())
         avail = max(0, self.width() - 2)
-        if avail <= 0:
-            super().setText(self._full)
-            return
-        super().setText(fm.elidedText(self._full, self._mode, avail))
+        shown = self._full if avail <= 0 else fm.elidedText(self._full, self._mode, avail)
+        if shown != self.text():
+            super().setText(shown)
 
 
 class ScrollingLabel(QWidget):
@@ -893,7 +902,9 @@ class NavItem(QWidget):
             col = theme.ACCENT if self._selected else theme.TEXT_MUTED
             pm = icons.pixmap(self._icon_name, 14, col)
             p.drawPixmap(x, (h - 14) // 2, 14, 14, pm)
-            x += 22
+        # Reserve the icon gutter even when a row has no icon, so icon-less
+        # lists (genres) stay column-aligned with the icon lists above them.
+        x += 22
 
         p.setFont(theme.font(12, 600 if self._selected else 400))
         p.setPen(QPen(theme.c(theme.TEXT if self._selected else theme.TEXT_DIM)))

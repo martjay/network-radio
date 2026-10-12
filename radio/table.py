@@ -452,12 +452,6 @@ class StationTable(QTreeView):
                 self.station_activated.emit(station)
                 event.accept()
                 return
-        if key == Qt.Key.Key_Space:
-            station = self._model.station_at(self.currentIndex().row())
-            if station:
-                self.station_activated.emit(station)
-                event.accept()
-                return
         if key == Qt.Key.Key_F and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             event.ignore()
             return

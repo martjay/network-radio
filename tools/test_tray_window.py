@@ -98,6 +98,54 @@ policy = QApplication.highDpiScaleFactorRoundingPolicy()
 check("rounding policy is PassThrough",
       policy == Qt.HighDpiScaleFactorRoundingPolicy.PassThrough, str(policy))
 
+print("\n=== 8. tray status header + icon state ===")
+win3 = MainWindow()
+win3.show()
+app.processEvents()
+if win3.tray and win3.tray.available:
+    win3.tray.set_playing("Test FM", "Artist - Title", playing=True)
+    check("menu header shows station", "Test FM" in win3.tray._act_status.text(),
+          win3.tray._act_status.text())
+    win3.tray.set_state(True, False, False)
+    check("tray icon switches when playing", not win3.tray.icon.icon().isNull())
+    win3.tray.set_playing("", "", playing=False)
+    check("menu header resets when idle", win3.tray._act_status.text() == "未在播放")
+else:
+    check("tray available", False, "no system tray on this desktop")
+
+print("\n=== 9. restore from tray preserves maximized ===")
+win3.library.set("close_to_tray", True, save=False)
+win3.library.set("tray_notifications", False, save=False)
+win3.showMaximized()
+app.processEvents()
+check("window is maximized", win3.isMaximized())
+win3.close()   # hides to tray
+app.processEvents()
+check("window hidden to tray", not win3.isVisible())
+win3._restore_from_tray()
+app.processEvents()
+check("restored still maximized", win3.isMaximized())
+
+print("\n=== 10. minimize-to-tray option ===")
+win3.library.set("minimize_to_tray", True, save=False)
+win3.showNormal()
+app.processEvents()
+win3.showMinimized()
+app.processEvents()
+win3._minimize_to_tray()   # the deferred hook; call directly for the test
+app.processEvents()
+check("minimized window hides to tray", not win3.isVisible())
+win3._restore_from_tray()
+app.processEvents()
+check("window restored from minimize-to-tray", win3.isVisible() and not win3.isMinimized())
+win3.library.set("minimize_to_tray", False, save=False)
+
+print("\n=== 11. engine shutdown is synchronous and idempotent ===")
+win3.engine.shutdown()
+win3.engine.shutdown()
+check("shutdown leaves engine idle", win3.engine.state == "idle")
+check("shutdown leaves no relay", win3.engine._relay is None)
+
 print()
 passed = sum(1 for _, ok in results if ok)
 failed = [n for n, ok in results if not ok]

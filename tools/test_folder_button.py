@@ -26,9 +26,12 @@ def check(name, ok, detail=""):
 
 
 print("=== 1. the exact case that used to crash ===")
-# C:\Users\tianj\Music\... is not writable in this sandbox, which is what made
-# the old handler raise PermissionError before it could open anything.
-unwritable = os.path.join(os.path.expanduser("~"), "Music", "Broadcast Recordings")
+# Use a path that is genuinely not writable without elevation: Program Files.
+# (The old version of this test used ~/Music, but _ensure_dir *creates* the
+# directory, so on machines where Music is writable the premise collapsed
+# the moment the probe ran.)
+unwritable = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                          "Broadcast Recordings")
 print(f"  unwritable path: {unwritable}")
 print(f"  _ensure_dir      : {_ensure_dir(unwritable)}")
 
@@ -44,7 +47,7 @@ check("falls back to a writable dir", _ensure_dir(resolved) and resolved != unwr
       resolved)
 
 print("\n=== 2. explicit writable directory ===")
-good = os.path.join(paths.app_dir(), "recordings")
+good = os.path.join(paths.install_dir(), "_test_recordings")
 win.library.set("recordings_dir", good, save=False)
 try:
     win._open_recordings()

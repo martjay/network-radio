@@ -221,9 +221,12 @@ class Recorder:
     def best_container(source: str, requested: str) -> str:
         """Pick a container that can hold `source` losslessly if possible.
 
-        Used when the user has not expressed a preference: copying the stream
-        keeps the audio bit-identical to the broadcast.
+        Copy-format requests (MP3/AAC) may remap when the stream cannot live
+        in that muxer. Explicit encode formats (WAV/FLAC/OGG/M4A) stay put
+        so a user who asked for WAV actually gets a WAV file.
         """
+        if requested in ("wav", "flac", "ogg", "m4a"):
+            return requested
         if requested and source in COPY_COMPATIBLE.get(requested, set()):
             return requested
         for candidate in ("mp3", "aac", "ogg", "flac", "m4a"):
@@ -406,11 +409,16 @@ class Recorder:
                 self._fmt = fmt
                 cmd = self._build_cmd(fmt)
                 try:
+                    # stderr must NOT be a pipe: nothing drains it while the
+                    # recording runs, and once the ~64 KB pipe buffer fills
+                    # (ffmpeg prints progress roughly once a second) ffmpeg
+                    # blocks on write and the recording silently stalls until
+                    # stop() times out and kills it.
                     self._proc = subprocess.Popen(
                         cmd,
                         stdin=subprocess.PIPE,
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
                         creationflags=CREATE_NO_WINDOW,
                     )
                 except Exception as exc:  # noqa: BLE001

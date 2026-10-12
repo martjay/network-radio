@@ -72,6 +72,7 @@ class PlayerEngine(QObject):
 
         self._audio = QAudioOutput()
         self._audio.setVolume(slider_to_linear(settings.get("volume", 72)))
+        self._audio.setMuted(bool(settings.get("muted", False)))
         self._player = QMediaPlayer()
         self._player.setAudioOutput(self._audio)
         self._abo = QAudioBufferOutput()
@@ -130,7 +131,7 @@ class PlayerEngine(QObject):
         self._set_state("connecting")
 
         url = station.get("url", "")
-        rec_dir = self.settings.get("recordings_dir") or paths.default_recordings_dir()
+        rec_dir = paths.recordings_dir(self.settings.get("recordings_dir") or "")
         want_rec = bool(self.settings.get("auto_record", False))
 
         def work():
@@ -176,6 +177,38 @@ class PlayerEngine(QObject):
             self.station = {}
         self._set_state("idle")
 
+    def shutdown(self) -> None:
+        """Tear the engine down synchronously. Safe to call more than once.
+
+        Unlike `stop()`, this does not offload relay shutdown to a daemon
+        thread: during process exit the interpreter is being dismantled, and
+        a daemon thread touching half-destroyed modules is a classic source
+        of random crashes-on-quit in frozen builds.
+        """
+        self._want_playing = False
+        self._generation += 1
+        self._meta_watch.stop()
+        self._stats_timer.stop()
+        try:
+            self._player.stop()
+            self._player.setSource(QUrl())
+        except RuntimeError:
+            pass  # underlying Qt object already gone (aboutToQuit path)
+        with self._relay_lock:
+            relay, self._relay = self._relay, None
+        if relay is not None:
+            try:
+                relay.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            if self._recording or self._recorder is not None:
+                self.stop_recording()
+        except Exception:  # noqa: BLE001
+            pass
+        if self.state != "idle":
+            self.state = "idle"
+
     def toggle(self) -> None:
         if self.state in ("playing", "buffering", "connecting"):
             self.stop()
@@ -197,10 +230,14 @@ class PlayerEngine(QObject):
         return self._audio.isMuted()
 
     # -- recording ------------------------------------------------------- #
-    def start_recording(self) -> bool:
+    def start_recording(self, expected_gen: int | None = None) -> bool:
+        if expected_gen is not None and expected_gen != self._generation:
+            return False
         if self._relay is None or not self._want_playing:
             return False
-        directory = self.settings.get("recordings_dir") or paths.default_recordings_dir()
+        if self._recording or self._recorder is not None:
+            self.stop_recording()
+        directory = paths.recordings_dir(self.settings.get("recordings_dir") or "")
         fmt = self.settings.get("record_format", "mp3")
         kbps = int(self.settings.get("record_bitrate", 192))
         name = self._recording_filename()
@@ -212,9 +249,9 @@ class PlayerEngine(QObject):
                 title=self.station.get("name", ""),
                 bitrate_kbps=kbps,
                 container=fmt,
-                # Let the recorder match the container to the real stream
-                # format; otherwise AAC/Opus stations cannot be written.
-                auto_container=True,
+                # MP3/AAC "copy stream" may remap if the source cannot live
+                # in that muxer. WAV/FLAC/OGG/M4A are kept and transcoded.
+                auto_container=fmt in ("mp3", "aac"),
             )
             rec.start()
         except Exception as exc:  # noqa: BLE001
@@ -324,7 +361,7 @@ class PlayerEngine(QObject):
         self._meta_watch.start()
         self._stats_timer.start()
         if want_rec:
-            QTimer.singleShot(900, self.start_recording)
+            QTimer.singleShot(900, lambda g=gen: self.start_recording(expected_gen=g))
 
     def _on_media_status(self, status) -> None:
         name = status.name

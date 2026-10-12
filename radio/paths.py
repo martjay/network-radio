@@ -78,15 +78,40 @@ def user_file(name: str) -> str:
     return os.path.join(app_dir(), name)
 
 
+def install_dir() -> str:
+    """Folder that holds the executable (or the project root when run from source)."""
+    if is_frozen():
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def default_recordings_dir() -> str:
-    if os.name == "nt":
-        base = os.path.join(os.path.expanduser("~"), "Music")
-    else:
-        base = os.path.join(os.path.expanduser("~"), "Music")
-    if not os.path.isdir(base):
-        base = os.path.expanduser("~")
-    path = os.path.join(base, "Broadcast Recordings")
-    return path
+    """Where recordings go when no custom directory is configured.
+
+    Always `<exe or project>/REC`, so a packaged build drops files next to
+    the executable instead of under AppData.
+    """
+    return os.path.join(install_dir(), "REC")
+
+
+def is_builtin_recordings_dir(path: str) -> bool:
+    """True when `path` is empty or one of the historical default folders."""
+    if not (path or "").strip():
+        return True
+    norm = os.path.normcase(os.path.abspath(path))
+    aliases = (
+        default_recordings_dir(),
+        os.path.join(install_dir(), "Rec"),
+        os.path.join(app_dir(), "recordings"),
+    )
+    return any(norm == os.path.normcase(os.path.abspath(item)) for item in aliases)
+
+
+def recordings_dir(configured: str = "") -> str:
+    """Resolve the recordings folder from a stored setting."""
+    if is_builtin_recordings_dir(configured):
+        return default_recordings_dir()
+    return configured
 
 
 def _resource_root() -> str:

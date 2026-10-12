@@ -124,6 +124,10 @@ def stylesheet() -> str:
 }}
 QWidget#Root {{
     background: {BG_APP};
+    border: 1px solid {STROKE_STRONG};
+}}
+QWidget#Root[chrome="flush"] {{
+    border: none;
 }}
 QToolTip {{
     background: {BG_PANEL_ALT};
@@ -258,6 +262,75 @@ QLineEdit#Search:focus {{
 QLabel#CountLabel {{
     color: {TEXT_MUTED};
     font-size: 11px;
+    font-family: "{mf}";
+}}
+QWidget#PagerBar {{
+    background: {BG_TOOLBAR};
+}}
+QWidget#PagerCluster {{
+    background: {BG_INPUT};
+    border: 1px solid {STROKE};
+    border-radius: {RADIUS}px;
+}}
+QPushButton#PagerBtn {{
+    background: transparent;
+    border: none;
+    border-radius: 0px;
+}}
+QPushButton#PagerBtn:hover {{
+    background: {BG_ROW_HOVER};
+}}
+QPushButton#PagerBtn:pressed {{
+    background: {BG_ROW_SEL};
+}}
+QPushButton#PagerBtn:disabled {{
+    background: transparent;
+}}
+QLabel#PagerReadout {{
+    color: {TEXT};
+    background: transparent;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: "{mf}";
+}}
+QLabel#PagerRange {{
+    color: {TEXT_MUTED};
+    font-size: 10px;
+    font-family: "{mf}";
+    letter-spacing: 0.4px;
+}}
+QLabel#PagerMicro {{
+    color: {TEXT_FAINT};
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+}}
+QComboBox#PagerField {{
+    background: {BG_INPUT};
+    border: 1px solid {STROKE};
+    border-radius: {RADIUS}px;
+    padding: 0px 4px 0px 8px;
+    color: {TEXT};
+    font-size: 11px;
+    font-family: "{mf}";
+    font-weight: 600;
+}}
+QComboBox#PagerField:hover {{
+    border-color: {STROKE_STRONG};
+}}
+QComboBox#PagerField:focus {{
+    border-color: {ACCENT_DIM};
+}}
+QComboBox#PagerField::drop-down {{
+    border: none;
+    width: 16px;
+}}
+QComboBox#PagerField QAbstractItemView {{
+    background: {BG_PANEL_ALT};
+    border: 1px solid {STROKE_STRONG};
+    color: {TEXT};
+    selection-background-color: {BG_ROW_SEL};
+    outline: none;
     font-family: "{mf}";
 }}
 
@@ -589,6 +662,22 @@ QCheckBox::indicator {{
     background: {BG_INPUT};
 }}
 QCheckBox::indicator:checked {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+}}
+QRadioButton {{
+    color: {TEXT_DIM};
+    font-size: 12px;
+    spacing: 7px;
+}}
+QRadioButton::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid {STROKE_STRONG};
+    border-radius: 7px;
+    background: {BG_INPUT};
+}}
+QRadioButton::indicator:checked {{
     background: {ACCENT};
     border-color: {ACCENT};
 }}

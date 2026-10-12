@@ -198,6 +198,35 @@ def _sliders(p: QPainter) -> None:
         p.setBrush(Qt.BrushStyle.NoBrush)
 
 
+def _gear(p: QPainter) -> None:
+    """Eight-tooth cog with a clear hub — reads as Settings at 16px."""
+    cx, cy = 12.0, 12.0
+    n = 8
+    r_tip, r_valley, r_hub = 8.6, 6.15, 2.55
+    path = QPainterPath()
+    started = False
+    for i in range(n):
+        a = -math.pi / 2 + i * (2 * math.pi / n)
+        span = 2 * math.pi / n
+        pts = (
+            (a - span * 0.18, r_valley),
+            (a - span * 0.11, r_tip),
+            (a + span * 0.11, r_tip),
+            (a + span * 0.18, r_valley),
+        )
+        for t, r in pts:
+            x = cx + r * math.cos(t)
+            y = cy + r * math.sin(t)
+            if not started:
+                path.moveTo(x, y)
+                started = True
+            else:
+                path.lineTo(x, y)
+    path.closeSubpath()
+    p.drawPath(path)
+    p.drawEllipse(QPointF(cx, cy), r_hub, r_hub)
+
+
 def _chevron_down(p: QPainter) -> None:
     p.drawPolyline(_poly((6.0, 9.5), (12.0, 15.0), (18.0, 9.5)))
 
@@ -357,6 +386,24 @@ def _external(p: QPainter) -> None:
     p.drawPolyline(_poly((16.0, 14.0), (16.0, 19.0), (5.0, 19.0), (5.0, 8.0), (10.0, 8.0)))
 
 
+def _chev_left(p: QPainter) -> None:
+    p.drawPolyline(_poly((14.2, 6.2), (8.6, 12.0), (14.2, 17.8)))
+
+
+def _chev_right(p: QPainter) -> None:
+    p.drawPolyline(_poly((9.8, 6.2), (15.4, 12.0), (9.8, 17.8)))
+
+
+def _chev_first(p: QPainter) -> None:
+    p.drawLine(QPointF(7.2, 6.2), QPointF(7.2, 17.8))
+    p.drawPolyline(_poly((17.2, 6.2), (11.4, 12.0), (17.2, 17.8)))
+
+
+def _chev_last(p: QPainter) -> None:
+    p.drawLine(QPointF(16.8, 6.2), QPointF(16.8, 17.8))
+    p.drawPolyline(_poly((6.8, 6.2), (12.6, 12.0), (6.8, 17.8)))
+
+
 def _sleep(p: QPainter) -> None:
     p.drawArc(QRectF(4.5, 4.5, 15.0, 15.0), 90 * 16, 180 * 16)
     p.drawArc(QRectF(7.0, 4.5, 12.5, 15.0), 90 * 16, 180 * 16)
@@ -383,6 +430,7 @@ DRAW = {
     "equalizer": _equalizer,
     "trash": _trash,
     "sliders": _sliders,
+    "gear": _gear,
     "chevron_down": _chevron_down,
     "chevron_up": _chevron_up,
     "chevron_left": _chevron_left,
@@ -411,6 +459,10 @@ DRAW = {
     "edit": _edit,
     "external": _external,
     "sleep": _sleep,
+    "chev_left": _chev_left,
+    "chev_right": _chev_right,
+    "chev_first": _chev_first,
+    "chev_last": _chev_last,
 }
 
 

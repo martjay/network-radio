@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QPainter
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu,
-    QPushButton, QScrollArea, QSizeGrip, QSizePolicy, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from . import appicon, icons, paths, theme
@@ -24,6 +25,19 @@ from .widgets import (
     PlayingIndicator, SearchField, SpectrumWidget, StatRow, TextButton, TransportButton,
     VolumeControl, hline, section_label, vline,
 )
+
+
+def _win32_hwnd_rect(hwnd: int):
+    """Physical GetWindowRect as (left, top, right, bottom), or None."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        r = wintypes.RECT()
+        if not ctypes.windll.user32.GetWindowRect(int(hwnd), ctypes.byref(r)):
+            return None
+        return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+    except Exception:
+        return None
 
 
 def _ensure_dir(path: str) -> bool:
@@ -42,27 +56,45 @@ def _ensure_dir(path: str) -> bool:
 
 
 def _reveal_in_file_manager(path: str) -> bool:
-    """Open `path` in the desktop file manager. Returns True on success."""
+    """Open `path` in the desktop file manager. Returns True on success.
+
+    Three independent attempts: `os.startfile`, then `explorer.exe`, then
+    Qt's handler. `startfile` can raise on machines with a damaged folder
+    association even when Explorer itself opens the path fine, which used to
+    leave the button silently copying the path instead of opening it.
+    """
     import subprocess
     import sys as _sys
 
-    try:
-        if _sys.platform == "win32":
+    if _sys.platform == "win32":
+        try:
             os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606
             return True
-        if _sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-            return True
-        subprocess.Popen(["xdg-open", path])
-        return True
-    except Exception:  # noqa: BLE001
-        # Fall back to Qt's own handler.
-        from PySide6.QtCore import QUrl
-        from PySide6.QtGui import QDesktopServices
+        except OSError:
+            pass
         try:
-            return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
+            from .recorder import CREATE_NO_WINDOW
+            subprocess.Popen(["explorer.exe", os.path.normpath(path)],
+                             creationflags=CREATE_NO_WINDOW)
+            return True
         except Exception:  # noqa: BLE001
-            return False
+            pass
+    else:
+        try:
+            if _sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+            return True
+        except Exception:  # noqa: BLE001
+            pass
+    # Last resort: Qt's own handler.
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+    try:
+        return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 class MiniBar(QWidget):
@@ -90,12 +122,54 @@ class MiniBar(QWidget):
         p.end()
 
 
+class ResizeCorner(QWidget):
+    """Visible bottom-right handle. Native QSizeGrip does nothing on a
+    frameless WS_POPUP, so this starts the same manual resize as the edges."""
+
+    def __init__(self, owner: "MainWindow", parent=None):
+        super().__init__(parent)
+        self._owner = owner
+        self.setFixedSize(32, 32)
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.setToolTip("拖动调整窗口大小")
+        self.setObjectName("ResizeCorner")
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            gp = event.globalPosition().toPoint()
+            self._owner._begin_edge_resize(
+                gp, Qt.Edge.RightEdge | Qt.Edge.BottomEdge,
+            )
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(theme.c(theme.TEXT))
+        w, h = self.width(), self.height()
+        for i in range(3):
+            for j in range(3 - i):
+                p.drawRect(w - 8 - i * 7, h - 8 - j * 7, 4, 4)
+        p.end()
+
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("Root")
         self.setWindowTitle(f"{paths.APP_TITLE} — 网络收音机")
-        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        # FramelessWindowHint alone strips WS_MINIMIZEBOX/WS_MAXIMIZEBOX, which
+        # is why clicking the taskbar button would not minimise/restore the
+        # window. The MinMax hints restore those styles without drawing any
+        # native buttons.
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+        )
         self.setMinimumSize(1180, 700)
 
         self.library = Library(self)
@@ -103,19 +177,26 @@ class MainWindow(QWidget):
         self.engine.set_proxy(self.library.proxy_config())
 
         self._section = self.library.get("genre", "all")
+        self._filtered_rows: list[dict] = []
+        self._page = 0
         self._sleep_deadline = 0.0
         self._play_started = 0.0
-        self._resize_edge = None
-        self._resize_origin = None
+        self._history_recorded_url = ""
         self._record_started = 0.0
         self._really_quit = False
         self._tray_hint_shown = False
+        self._pending_maximize = False
+        self._restoring_normal = False
+        self._rz_edges = Qt.Edge(0)
+        self._rz_origin = QPoint()
+        self._rz_geo = QRect()
         self.tray: TrayController | None = None
 
         self._build()
         self._wire()
         self._build_tray()
         self._restore_geometry()
+        self._restore_session_ui()
 
         self._apply_filters(select_last=True)
         self._refresh_sidebar_counts()
@@ -156,6 +237,10 @@ class MainWindow(QWidget):
 
         root.addWidget(hline(theme.STROKE))
         root.addWidget(self._build_statusbar())
+        # Overlay on the window itself so the grip sits on the true
+        # bottom-right pixel (the status bar layout has 12px margins).
+        self._resize_corner = ResizeCorner(self, self)
+        self._place_resize_corner()
 
     # ---------------------------------------------------------------- sidebar
     def _build_sidebar(self) -> QWidget:
@@ -257,8 +342,85 @@ class MainWindow(QWidget):
         lay.addWidget(self.table, 1)
 
         lay.addWidget(hline(theme.STROKE))
+        lay.addWidget(self._build_pager())
+
+        lay.addWidget(hline(theme.STROKE))
         lay.addWidget(self._build_nowbar())
         return center
+
+    def _build_pager(self) -> QWidget:
+        """Hairline page cluster under the station list."""
+        bar = QWidget()
+        bar.setObjectName("PagerBar")
+        bar.setFixedHeight(36)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(12, 4, 12, 4)
+        lay.setSpacing(10)
+
+        cluster = QWidget()
+        cluster.setObjectName("PagerCluster")
+        cluster.setFixedHeight(26)
+        cl = QHBoxLayout(cluster)
+        cl.setContentsMargins(1, 0, 1, 0)
+        cl.setSpacing(0)
+
+        def pager_btn(name: str, tip: str) -> IconButton:
+            btn = IconButton(name, 24, 12, tip, object_name="PagerBtn")
+            return btn
+
+        self._page_first = pager_btn("chev_first", "第一页")
+        self._page_first.clicked.connect(lambda: self._goto_page(0))
+        cl.addWidget(self._page_first)
+
+        self._page_prev = pager_btn("chev_left", "上一页")
+        self._page_prev.clicked.connect(lambda: self._goto_page(self._page - 1))
+        cl.addWidget(self._page_prev)
+
+        cl.addWidget(vline(theme.STROKE))
+
+        self._page_label = QLabel("1 / 1")
+        self._page_label.setObjectName("PagerReadout")
+        self._page_label.setFont(theme.font(11, 600, mono=True))
+        self._page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._page_label.setFixedWidth(72)
+        cl.addWidget(self._page_label)
+
+        cl.addWidget(vline(theme.STROKE))
+
+        self._page_next = pager_btn("chev_right", "下一页")
+        self._page_next.clicked.connect(lambda: self._goto_page(self._page + 1))
+        cl.addWidget(self._page_next)
+
+        self._page_last = pager_btn("chev_last", "最后一页")
+        self._page_last.clicked.connect(lambda: self._goto_page(self._page_count() - 1))
+        cl.addWidget(self._page_last)
+
+        lay.addWidget(cluster)
+
+        self._page_range = QLabel("")
+        self._page_range.setObjectName("PagerRange")
+        self._page_range.setFont(theme.font(10, 500, mono=True))
+        lay.addWidget(self._page_range)
+
+        lay.addStretch(1)
+
+        size_hint = QLabel("每页")
+        size_hint.setObjectName("PagerMicro")
+        size_hint.setFont(theme.label_font(8, 700, 1.2))
+        lay.addWidget(size_hint)
+
+        self._page_size_combo = QComboBox()
+        self._page_size_combo.setObjectName("PagerField")
+        self._page_size_combo.setFixedSize(58, 26)
+        self._page_size_combo.setFont(theme.font(11, 600, mono=True))
+        for n in (15, 30, 50, 100, 200):
+            self._page_size_combo.addItem(str(n), n)
+        saved = int(self.library.get("page_size", 30) or 30)
+        idx = self._page_size_combo.findData(saved)
+        self._page_size_combo.setCurrentIndex(idx if idx >= 0 else 1)
+        self._page_size_combo.currentIndexChanged.connect(self._on_page_size)
+        lay.addWidget(self._page_size_combo)
+        return bar
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
@@ -308,7 +470,7 @@ class MainWindow(QWidget):
         self._refresh_btn.clicked.connect(lambda: self._apply_filters())
         lay.addWidget(self._refresh_btn)
 
-        self._settings_btn = IconButton("sliders", 28, 15, "设置")
+        self._settings_btn = IconButton("gear", 28, 16, "设置")
         self._settings_btn.clicked.connect(self._open_preferences)
         lay.addWidget(self._settings_btn)
         return bar
@@ -324,7 +486,10 @@ class MainWindow(QWidget):
         self._mini_art = ArtTile(56, self)
         lay.addWidget(self._mini_art)
 
-        info_col = QVBoxLayout()
+        info_wrap = QWidget()
+        info_wrap.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        info_wrap.setMinimumWidth(64)
+        info_col = QVBoxLayout(info_wrap)
         info_col.setContentsMargins(0, 0, 0, 0)
         info_col.setSpacing(1)
         title_row = QHBoxLayout()
@@ -347,7 +512,7 @@ class MainWindow(QWidget):
         self._mini_track.setFont(theme.font(11, 500))
         self._mini_track.setStyleSheet(f"color: {theme.ACCENT};")
         info_col.addWidget(self._mini_track)
-        lay.addLayout(info_col, 1)
+        lay.addWidget(info_wrap, 1)
 
         # level meter + timer
         meter_col = QVBoxLayout()
@@ -368,7 +533,13 @@ class MainWindow(QWidget):
 
         lay.addWidget(vline(theme.STROKE, 1))
 
-        # transport
+        # transport — keep intrinsic width so shrinking the window elides
+        # the title instead of cycling the button row.
+        transport = QWidget()
+        transport.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        tl = QHBoxLayout(transport)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(6)
         self._btn_prev = TransportButton("prev", 34, 15, "上一个电台  (Ctrl+Left)")
         self._btn_play = TransportButton("play", 44, 20, "播放 / 暂停  (Space)", primary=True)
         self._btn_stop = TransportButton("stop", 34, 15, "停止")
@@ -376,14 +547,16 @@ class MainWindow(QWidget):
         self._btn_rec = TransportButton("record", 34, 15, "录制当前电台")
         self._btn_rec.setCheckable(True)
         for b in (self._btn_prev, self._btn_play, self._btn_stop, self._btn_next):
-            lay.addWidget(b)
-        lay.addSpacing(4)
-        lay.addWidget(self._btn_rec)
+            tl.addWidget(b)
+        tl.addSpacing(4)
+        tl.addWidget(self._btn_rec)
+        lay.addWidget(transport)
 
         lay.addWidget(vline(theme.STROKE, 1))
 
         self._volume = VolumeControl(int(self.library.get("volume", 72)))
-        self._volume.setFixedWidth(158)
+        self._volume.setMinimumWidth(96)
+        self._volume.setMaximumWidth(158)
         lay.addWidget(self._volume)
         return bar
 
@@ -407,16 +580,6 @@ class MainWindow(QWidget):
         lay = QVBoxLayout(inner)
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(8)
-
-        # ---- hero ------------------------------------------------------
-        self._art = ArtTile(134, self)
-        art_wrap = QWidget()
-        aw = QHBoxLayout(art_wrap)
-        aw.setContentsMargins(0, 0, 0, 0)
-        aw.addStretch(1)
-        aw.addWidget(self._art)
-        aw.addStretch(1)
-        lay.addWidget(art_wrap)
 
         self._np_title = ElideLabel("未选择电台")
         self._np_title.setObjectName("NpTitle")
@@ -527,8 +690,9 @@ class MainWindow(QWidget):
         bar.setObjectName("StatusBar")
         bar.setFixedHeight(theme.STATUSBAR_H)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(12, 0, 12, 0)
-        lay.setSpacing(10)
+        # Leave room on the right for the overlay resize grip.
+        lay.setContentsMargins(12, 0, 34, 0)
+        lay.setSpacing(8)
 
         self._status_text = QLabel("就绪")
         self._status_text.setObjectName("StatusText")
@@ -564,13 +728,9 @@ class MainWindow(QWidget):
         self._status_right = QLabel("--")
         self._status_right.setObjectName("StatusText")
         self._status_right.setFont(theme.font(11, 400, mono=True))
-        self._status_right.setMinimumWidth(190)
         self._status_right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         lay.addWidget(self._status_right)
 
-        grip = QSizeGrip(bar)
-        grip.setFixedSize(14, 14)
-        lay.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
         return bar
 
     # ================================================================== #
@@ -626,10 +786,193 @@ class MainWindow(QWidget):
         QShortcut(QKeySequence("Escape"), self, self._on_escape)
         QShortcut(QKeySequence("F11"), self, self._toggle_max)
 
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        et = event.type()
+        if self._rz_edges and hasattr(event, "globalPosition"):
+            if et in (QEvent.Type.MouseMove, QEvent.Type.MouseButtonRelease):
+                gp = event.globalPosition().toPoint()
+                self._apply_manual_resize(gp)
+                if et == QEvent.Type.MouseButtonRelease:
+                    self._rz_edges = Qt.Edge(0)
+                    if QWidget.mouseGrabber() is self:
+                        self.releaseMouse()
+                return True
+        widget = obj if isinstance(obj, QWidget) else None
+        if (widget is not None and widget.window() is self
+                and not self.isMaximized() and not self.isFullScreen()
+                and hasattr(event, "globalPosition")):
+            # Title-bar window buttons sit on the top-right edge. Stealing
+            # those presses for resize made maximize/close feel broken.
+            if widget.objectName() in ("WinBtn", "WinBtnClose"):
+                return super().eventFilter(obj, event)
+            gp = event.globalPosition().toPoint()
+            edges = self._resize_edges_at(gp)
+            if self._in_resize_corner(gp):
+                edges = Qt.Edge.RightEdge | Qt.Edge.BottomEdge
+            if et == QEvent.Type.MouseMove:
+                self._apply_resize_cursor(widget, edges)
+            elif (et == QEvent.Type.MouseButtonPress
+                    and event.button() == Qt.MouseButton.LeftButton
+                    and edges):
+                self._begin_edge_resize(gp, edges)
+                return True
+        return super().eventFilter(obj, event)
+
+    def _platform_geo(self) -> QRect:
+        """HWND rect in logical pixels. Qt geometry can lie after un-maximize."""
+        native = _win32_hwnd_rect(int(self.winId()))
+        if not native:
+            return QRect(self.geometry())
+        dpr = float(self.devicePixelRatioF() or 1.0)
+        l, t, r, b = native
+        return QRect(
+            int(round(l / dpr)), int(round(t / dpr)),
+            int(round((r - l) / dpr)), int(round((b - t) / dpr)),
+        )
+
+    def _set_platform_geo(self, rect: QRect, restore_state: bool = False) -> None:
+        w = max(self.minimumWidth(), rect.width())
+        h = max(self.minimumHeight(), rect.height())
+        x, y = rect.x(), rect.y()
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            if restore_state:
+                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            dpr = float(self.devicePixelRatioF() or 1.0)
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, 0,
+                int(round(x * dpr)), int(round(y * dpr)),
+                int(round(w * dpr)), int(round(h * dpr)),
+                0x0004 | 0x0020,  # SWP_NOZORDER | SWP_FRAMECHANGED
+            )
+        except Exception:
+            pass
+        self.resize(w, h)
+        self.move(x, y)
+
+    def _begin_edge_resize(self, gp: QPoint, edges) -> None:
+        if self.isMaximized() or self.isFullScreen() or not edges:
+            return
+        self._rz_origin = QPoint(gp)
+        self._rz_geo = QRect(self._platform_geo())
+        self._rz_edges = edges
+        self.grabMouse()
+
+    def _apply_manual_resize(self, gp: QPoint) -> None:
+        dx = gp.x() - self._rz_origin.x()
+        dy = gp.y() - self._rz_origin.y()
+        g = QRect(self._rz_geo)
+        minw, minh = self.minimumWidth(), self.minimumHeight()
+        x, y, w, h = g.x(), g.y(), g.width(), g.height()
+        if self._rz_edges & Qt.Edge.LeftEdge:
+            w = max(minw, w - dx)
+            x = g.x() + g.width() - w
+        if self._rz_edges & Qt.Edge.RightEdge:
+            w = max(minw, g.width() + dx)
+        if self._rz_edges & Qt.Edge.TopEdge:
+            h = max(minh, h - dy)
+            y = g.y() + g.height() - h
+        if self._rz_edges & Qt.Edge.BottomEdge:
+            h = max(minh, g.height() + dy)
+        self._set_platform_geo(QRect(x, y, w, h))
+
+    def _in_resize_corner(self, gp: QPoint) -> bool:
+        if self.isMaximized() or self.isFullScreen():
+            return False
+        r = self._platform_geo()
+        return gp.x() >= r.x() + r.width() - 36 and gp.y() >= r.y() + r.height() - 36
+
+    def _resize_edges_at(self, gp: QPoint):
+        """Which Qt.Edge values the global point sits on, or 0."""
+        if self.isMaximized() or self.isFullScreen():
+            return Qt.Edge(0)
+        b = 16
+        r = self._platform_geo()
+        edges = Qt.Edge(0)
+        if gp.x() < r.x() + b:
+            edges |= Qt.Edge.LeftEdge
+        if gp.x() >= r.x() + r.width() - b:
+            edges |= Qt.Edge.RightEdge
+        if gp.y() < r.y() + b:
+            edges |= Qt.Edge.TopEdge
+        if gp.y() >= r.y() + r.height() - b:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    def _apply_resize_cursor(self, widget: QWidget, edges) -> None:
+        left = bool(edges & Qt.Edge.LeftEdge)
+        right = bool(edges & Qt.Edge.RightEdge)
+        top = bool(edges & Qt.Edge.TopEdge)
+        bottom = bool(edges & Qt.Edge.BottomEdge)
+        if (left and top) or (right and bottom):
+            widget.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif (right and top) or (left and bottom):
+            widget.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif left or right:
+            widget.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif top or bottom:
+            widget.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            widget.unsetCursor()
+
+    def _place_resize_corner(self) -> None:
+        c = getattr(self, "_resize_corner", None)
+        if c is None:
+            return
+        c.move(self.width() - c.width(), self.height() - c.height())
+        c.raise_()
+        c.setVisible(not self.isMaximized() and not self.isFullScreen())
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self._place_resize_corner()
+
+    def _restore_session_ui(self) -> None:
+        """Apply persisted chrome that widgets do not read on their own.
+
+        The library already holds last session's filters, mute and spectrum
+        flag. Without this pass the sidebar highlight, chips, country combo
+        and mute state always boot as defaults even when userdata says otherwise.
+        """
+        section = self.library.get("genre", "all") or "all"
+        self._section = section
+        if section in self._nav_items:
+            self._set_nav(section)
+
+        self._fav_chip.blockSignals(True)
+        self._fav_chip.setChecked(bool(self.library.get("favorites_only", False)))
+        self._fav_chip.blockSignals(False)
+
+        self._zh_chip.blockSignals(True)
+        self._zh_chip.setChecked(bool(self.library.get("zh_only", False)))
+        self._zh_chip.blockSignals(False)
+
+        country = self.library.get("country", "all") or "all"
+        cidx = self._country_combo.findData(country)
+        self._country_combo.blockSignals(True)
+        if cidx >= 0:
+            self._country_combo.setCurrentIndex(cidx)
+        else:
+            self._country_combo.setCurrentIndex(0)
+            if country != "all":
+                self.library.set("country", "all", save=False)
+        self._country_combo.blockSignals(False)
+
+        muted = bool(self.library.get("muted", False))
+        self._volume.set_muted(muted)
+        self.engine.set_muted(muted)
+
+        self._spectrum.setVisible(bool(self.library.get("show_spectrum", True)))
+
     # ================================================================== #
     #  data flow
     # ================================================================== #
-    def _apply_filters(self, select_last: bool = False) -> None:
+    def _apply_filters(self, select_last: bool = False, keep_page: bool = False) -> None:
         text = self.search.text().strip()
         country = self._country_combo.currentData() or "all"
         min_br = 128 if self._quality_chip.isChecked() else int(self.library.get("min_bitrate", 0))
@@ -642,20 +985,93 @@ class MainWindow(QWidget):
             zh_only=self._zh_chip.isChecked(),
             sort=self._sort_combo.currentData() or "score",
         )
-        self.model.set_rows(rows)
-        self.model.set_playing(
-            self.engine.station.get("url", "") if self.engine.state != "idle" else "",
-            self.engine.station.get("url", "") if self.engine.state == "connecting" else "",
-        )
+        self._filtered_rows = rows
+        if select_last and self.engine.station:
+            # Jump to the page holding the playing station before selecting it.
+            url = self.engine.station.get("url", "")
+            size = self._page_size()
+            for i, r in enumerate(rows):
+                if r.get("url") == url:
+                    self._page = i // size
+                    break
+            else:
+                self._page = 0
+        elif not keep_page:
+            self._page = 0
+        self._show_page()
         self._count_label.setText(f"{len(rows)} / {len(self.library.all_stations())}")
         self._update_status()
 
         if select_last and self.engine.station:
             self.table.select_url(self.engine.station.get("url", ""))
-        elif rows and not self.table.currentIndex().isValid():
+        elif self.model.rows and not self.table.currentIndex().isValid():
             self.table.setCurrentIndex(self.model.index(0, 1))
         if self.engine.station:
             self._show_station_detail(self.engine.station)
+
+    # -- pagination ------------------------------------------------------
+    def _page_size(self) -> int:
+        return int(self._page_size_combo.currentData() or 30)
+
+    def _page_count(self) -> int:
+        size = self._page_size()
+        return max(1, (len(self._filtered_rows) + size - 1) // size)
+
+    def _show_page(self) -> None:
+        pages = self._page_count()
+        self._page = max(0, min(self._page, pages - 1))
+        size = self._page_size()
+        start = self._page * size
+        self.model.set_rows(self._filtered_rows[start:start + size])
+        self.model.set_playing(
+            self.engine.station.get("url", "") if self.engine.state != "idle" else "",
+            self.engine.station.get("url", "") if self.engine.state == "connecting" else "",
+        )
+        self._page_label.setText(f"{self._page + 1} / {pages}")
+        at_start = self._page <= 0
+        at_end = self._page >= pages - 1
+        self._page_first.setEnabled(not at_start)
+        self._page_prev.setEnabled(not at_start)
+        self._page_next.setEnabled(not at_end)
+        self._page_last.setEnabled(not at_end)
+        total = len(self._filtered_rows)
+        if total == 0:
+            self._page_range.setText("0")
+        else:
+            lo = start + 1
+            hi = min(start + size, total)
+            self._page_range.setText(f"{lo}–{hi}  ·  {total}")
+
+    def _goto_page(self, page: int) -> None:
+        page = max(0, min(page, self._page_count() - 1))
+        if page == self._page:
+            return
+        self._page = page
+        self._show_page()
+        if self.model.rows:
+            self.table.setCurrentIndex(self.model.index(0, 1))
+
+    def _on_page_size(self) -> None:
+        old_size = int(self.library.get("page_size", 30) or 30)
+        first = self._page * old_size           # keep the same anchor row in view
+        new_size = self._page_size()
+        self.library.set("page_size", new_size, save=False)
+        self._page = first // new_size
+        self._show_page()
+        if self.model.rows:
+            self.table.setCurrentIndex(self.model.index(0, 1))
+
+    def select_station(self, url: str) -> None:
+        """Jump to the page containing `url` and select the row there."""
+        size = self._page_size()
+        for i, r in enumerate(self._filtered_rows):
+            if r.get("url") == url:
+                page = i // size
+                if page != self._page:
+                    self._page = page
+                    self._show_page()
+                break
+        self.table.select_url(url)
 
     def _refresh_sidebar_counts(self) -> None:
         counts = {
@@ -715,7 +1131,7 @@ class MainWindow(QWidget):
             return
         self._show_station_detail(station)
         self._mini_title.setText(station.get("name", ""))
-        self.table.select_url(url)
+        self.select_station(url)
         if self.library.get("resume_last", True):
             QTimer.singleShot(400, lambda: self.engine.tune(station))
 
@@ -729,7 +1145,6 @@ class MainWindow(QWidget):
         genre = GENRE_ZH.get(station.get("genre", ""), station.get("genre", ""))
         self._np_title.setText(name)
         self._np_sub.setText(" · ".join([b for b in [country, genre] if b]))
-        self._art.set_station(name, (station.get("codec") or "").upper())
 
         self._info_rows["国家"].set_value(country)
         self._info_rows["地区"].set_value(station.get("state", "") or "--")
@@ -768,15 +1183,22 @@ class MainWindow(QWidget):
     # ================================================================== #
     #  playback
     # ================================================================== #
+    def _halt_playback(self) -> None:
+        """User-initiated stop. Retune must not go through here or the sleep timer resets."""
+        self.engine.stop()
+        self._play_started = 0.0
+        self._sleep_deadline = 0.0
+        self._history_recorded_url = ""
+
     def _on_station_activated(self, station: dict) -> None:
         if station.get("url") == self.engine.station.get("url") and self.engine.state == "playing":
-            self.engine.stop()
+            self._halt_playback()
             return
         self.engine.tune(station)
 
     def _on_play_clicked(self) -> None:
         if self.engine.state in ("playing", "buffering", "connecting"):
-            self.engine.stop()
+            self._halt_playback()
             return
         station = self._current_station()
         if station:
@@ -785,21 +1207,30 @@ class MainWindow(QWidget):
             info(self, "没有选中电台", "请先在列表中选择一个电台。")
 
     def _on_stop_clicked(self) -> None:
-        self.engine.stop()
+        self._halt_playback()
 
     def _step(self, delta: int) -> None:
-        rows = self.model.rows
+        """Tune the previous/next station across the whole filtered list,
+        turning pages as needed."""
+        rows = self._filtered_rows
         if not rows:
             return
-        current = self.model.row_of(self.engine.station.get("url", ""))
+        url = self.engine.station.get("url", "")
+        current = next((i for i, r in enumerate(rows) if r.get("url") == url), -1)
         if current < 0:
-            current = self.table.currentIndex().row()
+            sel = self.table.currentIndex().row()
+            current = self._page * self._page_size() + (sel if sel >= 0 else 0)
         nxt = (current + delta) % len(rows)
-        station = self.model.station_at(nxt)
-        if station:
-            self.table.setCurrentIndex(self.model.index(nxt, 1))
-            self.table.scrollTo(self.model.index(nxt, 1))
-            self.engine.tune(station)
+        size = self._page_size()
+        page = nxt // size
+        if page != self._page:
+            self._page = page
+            self._show_page()
+        station = rows[nxt]
+        row_in_page = nxt - self._page * size
+        self.table.setCurrentIndex(self.model.index(row_in_page, 1))
+        self.table.scrollTo(self.model.index(row_in_page, 1))
+        self.engine.tune(station)
 
     def _on_volume(self, value: int) -> None:
         self.engine.set_volume(value)
@@ -831,7 +1262,6 @@ class MainWindow(QWidget):
         self._mini_indicator.set_active(state == "playing")
         self.titlebar.set_now_playing(self._mini_track.fullText(), state == "playing")
         self._spectrum.set_active(state == "playing")
-        self._art.set_playing(state == "playing")
 
         if state == "idle":
             # Keep the last station on screen when playback stops: an operator
@@ -856,9 +1286,15 @@ class MainWindow(QWidget):
                 self.engine.station.get("url", "") if state == "connecting" else "",
             )
 
-        if state == "playing" and self._play_started == 0.0:
-            self._play_started = time.time()
-            self._arm_sleep_timer()
+        if state == "playing":
+            url = self.engine.station.get("url", "") if self.engine.station else ""
+            if url and url != self._history_recorded_url:
+                self.library.record_play(self.engine.station)
+                self._history_recorded_url = url
+                self._refresh_sidebar_counts()
+            if self._play_started == 0.0:
+                self._play_started = time.time()
+                self._arm_sleep_timer()
 
     def _on_station_changed(self, station: dict) -> None:
         self._show_station_detail(station)
@@ -875,15 +1311,19 @@ class MainWindow(QWidget):
             bits.append(f"{station['bitrate']} kbps")
         self._mini_meta.setText(" · ".join(bits))
         self.titlebar.set_codec(f"{station.get('codec', '')} {station.get('bitrate', '')}k".strip())
-        self.library.record_play(station)
-        self._refresh_sidebar_counts()
         self.model.refresh_row(station.get("url", ""))
 
     def _on_metadata(self, title: str) -> None:
+        prev = self._mini_track.fullText()
         self._mini_track.setText(title)
         self._np_track.setText(title)
         self.titlebar.set_now_playing(title, self.engine.state == "playing")
         self._sync_tray()
+        if (title and title != prev
+                and bool(self.library.get("notify_track", False))
+                and self.tray is not None):
+            station = self.engine.station.get("name", "") if self.engine.station else ""
+            self.tray.notify(station or paths.APP_TITLE, title)
 
     def _on_icy_name(self, name: str) -> None:
         if name and not self._mini_track.fullText():
@@ -912,8 +1352,7 @@ class MainWindow(QWidget):
         self._mini_time.setText(
             f"{int(elapsed//3600):02d}:{int(elapsed%3600//60):02d}:{int(elapsed%60):02d}")
         self._status_right.setText(
-            f"{kbps:6.0f} kbps   缓冲 {buf/1024:5.0f} KB   "
-            f"丢帧 {dropped/1024:4.0f} KB"
+            f"{kbps:.0f} kbps  缓冲 {buf/1024:.0f} KB  丢帧 {dropped/1024:.0f} KB"
         )
 
     def _on_favorites_changed(self) -> None:
@@ -936,9 +1375,16 @@ class MainWindow(QWidget):
     def _toggle_favorite_current(self) -> None:
         station = self._current_station()
         if not station:
+            if not self.isVisible() and self.tray is not None and self.tray.available:
+                self.tray.notify(paths.APP_TITLE, "当前没有正在播放的电台")
             return
-        self._on_favorite_toggled(station.get("url", ""))
+        url = station.get("url", "")
+        was_fav = self.library.is_favorite(url)
+        self._on_favorite_toggled(url)
         self._show_station_detail(station)
+        if not self.isVisible() and self.tray is not None and self.tray.available:
+            verb = "已取消收藏" if was_fav else "已收藏"
+            self.tray.notify(paths.APP_TITLE, f"{verb}：{station.get('name', '')}")
 
     def _copy_url(self) -> None:
         station = self._current_station()
@@ -960,12 +1406,11 @@ class MainWindow(QWidget):
         created, so a locked-down or missing Music folder never leaves the
         user with a dead button and no explanation.
         """
-        wanted = self.library.get("recordings_dir") or paths.default_recordings_dir()
+        wanted = paths.recordings_dir(self.library.get("recordings_dir") or "")
         if _ensure_dir(wanted):
             return wanted
         fallback = os.path.join(paths.app_dir(), "recordings")
-        if _ensure_dir(fallback):
-            self.library.set("recordings_dir", fallback, save=False)
+        if fallback != wanted and _ensure_dir(fallback):
             self._status_text.setText(f"原录音目录不可写，已改用 {fallback}")
             return fallback
         return wanted
@@ -994,7 +1439,7 @@ class MainWindow(QWidget):
             self._section = "custom"
             self._set_nav("custom")
             self._apply_filters()
-            self.table.select_url(station.get("url", ""))
+            self.select_station(station.get("url", ""))
 
     def _edit_station(self, station: dict) -> None:
         dlg = StationDialog(self, station, self.engine)
@@ -1027,11 +1472,31 @@ class MainWindow(QWidget):
             idx = self._sort_combo.findData(self.library.get("sort", "score"))
             if idx >= 0:
                 self._sort_combo.setCurrentIndex(idx)
+            cidx = self._country_combo.findData(self.library.get("country", "all") or "all")
+            self._country_combo.blockSignals(True)
+            self._country_combo.setCurrentIndex(cidx if cidx >= 0 else 0)
+            self._country_combo.blockSignals(False)
+            muted = bool(self.library.get("muted", False))
+            self._volume.set_muted(muted)
+            self.engine.set_muted(muted)
+            self._arm_sleep_timer(restart=True)
             self._apply_filters()
 
     # ================================================================== #
     #  recording
     # ================================================================== #
+    def _inform(self, title: str, message: str) -> None:
+        """Tell the user something, wherever they currently are.
+
+        A modal dialog on a window that is hidden in the tray is invisible
+        and blocks nothing the user can see, so tray-initiated actions fall
+        back to a balloon notification instead.
+        """
+        if self.isVisible():
+            info(self, title, message)
+        elif self.tray is not None and self.tray.available:
+            self.tray.notify(title, message)
+
     def _toggle_record(self) -> None:
         if self.engine.is_recording:
             path = self.engine.stop_recording()
@@ -1039,9 +1504,12 @@ class MainWindow(QWidget):
             self._rec_button.setChecked(False)
             if path:
                 self._status_text.setText(f"录音已保存：{path}")
+                if not self.isVisible() and self.tray is not None and self.tray.available:
+                    self.tray.notify(paths.APP_TITLE,
+                                     f"录音已保存：{os.path.basename(path)}")
         else:
             if self.engine.state not in ("playing", "buffering"):
-                info(self, "无法录制", "请先播放一个电台，再开始录制。")
+                self._inform("无法录制", "请先播放一个电台，再开始录制。")
                 self._btn_rec.setChecked(False)
                 self._rec_button.setChecked(False)
                 return
@@ -1049,6 +1517,8 @@ class MainWindow(QWidget):
                 self._record_started = time.time()
                 self._btn_rec.setChecked(True)
                 self._rec_button.setChecked(True)
+                if not self.isVisible() and self.tray is not None and self.tray.available:
+                    self.tray.notify(paths.APP_TITLE, "已开始录制")
 
     def _on_recording_changed(self, active: bool, path: str) -> None:
         self._btn_rec.setChecked(active)
@@ -1086,6 +1556,8 @@ class MainWindow(QWidget):
             item.set_selected(nav_key == key)
 
     def _on_country(self) -> None:
+        country = self._country_combo.currentData() or "all"
+        self.library.set("country", country, save=False)
         self._apply_filters()
 
     def _on_quality(self) -> None:
@@ -1156,11 +1628,18 @@ class MainWindow(QWidget):
     # ================================================================== #
     #  sleep timer / clock
     # ================================================================== #
-    def _arm_sleep_timer(self) -> None:
+    def _arm_sleep_timer(self, restart: bool = False) -> None:
         minutes = int(self.library.get("sleep_minutes", 0) or 0)
-        if minutes > 0 and self._play_started:
-            self._sleep_deadline = self._play_started + minutes * 60
-        else:
+        if minutes <= 0:
+            self._sleep_deadline = 0.0
+            return
+        # Keep an already-running timer across station changes. Prefs apply
+        # passes restart=True so a newly chosen duration takes effect.
+        if not restart and self._sleep_deadline > time.time():
+            return
+        if self.engine.state in ("playing", "buffering"):
+            self._sleep_deadline = time.time() + minutes * 60
+        elif restart:
             self._sleep_deadline = 0.0
 
     def _tick(self) -> None:
@@ -1177,8 +1656,10 @@ class MainWindow(QWidget):
             remaining = self._sleep_deadline - time.time()
             if remaining <= 0:
                 self._sleep_deadline = 0.0
+                self._play_started = 0.0
                 action = self.library.get("sleep_action", "stop")
                 if action == "quit":
+                    self._really_quit = True
                     self.close()
                 else:
                     self.engine.stop()
@@ -1186,9 +1667,6 @@ class MainWindow(QWidget):
             elif self.engine.state == "playing":
                 mins, secs = divmod(int(remaining), 60)
                 self._status_text.setText(f"播放中 · 定时关闭 {mins:02d}:{secs:02d}")
-
-        if self.engine.state == "idle":
-            self._play_started = 0.0
 
     def _on_escape(self) -> None:
         if self.search.text():
@@ -1200,16 +1678,85 @@ class MainWindow(QWidget):
     #  window chrome
     # ================================================================== #
     def _toggle_max(self) -> None:
-        if self.isMaximized():
-            self.showNormal()
+        before = self.isMaximized()
+        if before:
+            ng = self.normalGeometry()
+            # showNormal() on this frameless chrome either keeps the
+            # work-area size or gets immediately re-maximized by a queued
+            # WindowStateChange. Hold the restoring flag so changeEvent
+            # can swallow that echo, then apply the floating rect.
+            self._restoring_normal = True
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMaximized)
+            if (ng.isValid()
+                    and ng.width() >= self.minimumWidth()
+                    and ng.height() >= self.minimumHeight()):
+                self._set_platform_geo(QRect(ng), restore_state=True)
+            QTimer.singleShot(0, lambda n=QRect(ng): self._finish_restore_normal(n))
         else:
             self.showMaximized()
         self.titlebar.set_maximized(self.isMaximized())
 
+    def _finish_restore_normal(self, ng) -> None:
+        if self.isMaximized():
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMaximized)
+        if ng.isValid() and ng.width() >= self.minimumWidth() and ng.height() >= self.minimumHeight():
+            # Always push the HWND even when Qt already reports the wanted
+            # size: after un-maximize the native window can stay work-area
+            # sized while geometry() pretends it shrank.
+            self._set_platform_geo(QRect(ng), restore_state=True)
+        self.titlebar.set_maximized(False)
+        # Keep _restoring_normal until the next event-loop turn so a queued
+        # maximize echo (observed immediately after this) is still swallowed.
+        QTimer.singleShot(0, self._clear_restoring_normal)
+
+    def _clear_restoring_normal(self) -> None:
+        if self._restoring_normal and self.isMaximized():
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMaximized)
+        self._restoring_normal = False
+        self.titlebar.set_maximized(self.isMaximized())
+
+    def _apply_window_chrome(self) -> None:
+        """Hairline border + Win11 small corners when floating; flush when maximized."""
+        flush = self.isMaximized() or self.isFullScreen()
+        self.setProperty("chrome", "flush" if flush else "framed")
+        self.style().unpolish(self)
+        self.style().polish(self)
+        lay = self.layout()
+        if lay is not None:
+            m = 0 if flush else 1
+            lay.setContentsMargins(m, m, m, m)
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            # DWMWA_WINDOW_CORNER_PREFERENCE (Win11). No-op on older builds.
+            pref = ctypes.c_int(1 if flush else 3)  # DONOTROUND / ROUNDSMALL
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+        except Exception:
+            pass
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        if self._pending_maximize:
+            self._pending_maximize = False
+            self.showMaximized()
+            self.titlebar.set_maximized(True)
+        self._apply_window_chrome()
+
     def changeEvent(self, event):  # noqa: N802
         super().changeEvent(event)
         if event.type() == event.Type.WindowStateChange:
+            if self._restoring_normal and self.isMaximized():
+                self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMaximized)
+                return
             self.titlebar.set_maximized(self.isMaximized())
+            self._place_resize_corner()
+            self._apply_window_chrome()
+            # Defer to the next event-loop turn: the minimised state must be
+            # fully applied before we hide, or the taskbar button lingers.
+            if self.isMinimized():
+                QTimer.singleShot(0, self._minimize_to_tray)
 
     # ================================================================== #
     #  tray
@@ -1231,9 +1778,36 @@ class MainWindow(QWidget):
         self.tray.show()
 
     def _restore_from_tray(self) -> None:
-        self.showNormal()
+        """Bring the window back from the tray, preserving its previous state.
+
+        `show()` (not `showNormal()`) keeps the maximized flag the window had
+        when it was hidden, so double-clicking the tray icon no longer knocks
+        a maximized window back to a floating one. When the window is already
+        visible we only raise and activate it.
+        """
+        if self.isMinimized():
+            self.setWindowState(
+                (self.windowState() & ~Qt.WindowState.WindowMinimized)
+                | Qt.WindowState.WindowActive)
+        if not self.isVisible():
+            self.show()
+        if self.isMaximized():
+            self.showMaximized()
         self.raise_()
         self.activateWindow()
+
+    def _minimize_to_tray(self) -> None:
+        """Hide a minimised window to the tray when that option is enabled."""
+        if not bool(self.library.get("minimize_to_tray", False)):
+            return
+        if self.tray is None or not self.tray.available:
+            return
+        if not self.isMinimized():
+            return
+        self.hide()
+        if self.library.get("tray_notifications", True):
+            self.tray.notify(paths.APP_TITLE,
+                             "已最小化到托盘，双击托盘图标恢复窗口。")
 
     def _quit_from_tray(self) -> None:
         self._really_quit = True
@@ -1242,12 +1816,16 @@ class MainWindow(QWidget):
     def _sync_tray(self) -> None:
         if self.tray is None or not self.tray.available:
             return
-        playing = self.engine.state == "playing"
+        state = self.engine.state
+        # Same rule as the nowbar pause button: buffering is still on-air.
+        # Connecting stays "not playing" visually, but the tooltip says so
+        # instead of calling a stop "paused" (this player has no pause).
+        live = state in ("playing", "buffering")
         station = self.engine.station.get("name", "")
         track = self._mini_track.fullText()
-        self.tray.set_playing(station, track, playing)
+        self.tray.set_playing(station, track, playing=live, state=state)
         url = self.engine.station.get("url", "")
-        self.tray.set_state(playing, self.engine.is_recording,
+        self.tray.set_state(live, self.engine.is_recording,
                             self.library.is_favorite(url) if url else False)
 
     # ================================================================== #
@@ -1263,11 +1841,11 @@ class MainWindow(QWidget):
         screen = self._target_screen()
         avail = screen.availableGeometry() if screen else None
 
-        if self.library.get("window_maximized", False):
-            self.showMaximized()
-            self.titlebar.set_maximized(True)
-            return
-
+        # Apply the floating size first even when the last session was
+        # maximized. showMaximized() during construction (before a normal
+        # geometry exists) leaves Qt with no restore rect, so the title-bar
+        # restore button would snap to the full available screen instead of
+        # the size the user actually had.
         restored = False
         geo = self.library.get("window_geometry", "")
         parts = str(geo).split(",") if geo else []
@@ -1275,19 +1853,34 @@ class MainWindow(QWidget):
             try:
                 x, y, w, h = (int(p) for p in parts)
                 if avail is not None:
-                    # Clamp size, then nudge the window fully back on screen if
-                    # the display layout changed (unplugged monitor, etc.).
-                    w = max(self.minimumWidth(), min(w, avail.width()))
-                    h = max(self.minimumHeight(), min(h, avail.height()))
-                    x = max(avail.left(), min(x, avail.right() - w))
-                    y = max(avail.top(), min(y, avail.bottom() - h))
-                self.setGeometry(x, y, w, h)
-                restored = True
+                    # A previous session that maximized before Qt had a restore
+                    # rect would persist the work-area size as "normal". Treat
+                    # that as unset so restore-down does not stay full screen.
+                    fullish = (w >= avail.width() - 16 and h >= avail.height() - 16)
+                    if fullish:
+                        restored = False
+                    else:
+                        w = max(self.minimumWidth(), min(w, avail.width()))
+                        h = max(self.minimumHeight(), min(h, avail.height()))
+                        x = max(avail.left(), min(x, avail.right() - w))
+                        y = max(avail.top(), min(y, avail.bottom() - h))
+                        self.setGeometry(x, y, w, h)
+                        restored = True
+                else:
+                    self.setGeometry(x, y, w, h)
+                    restored = True
             except (TypeError, ValueError):
                 restored = False
 
         if not restored:
             self._center_default(avail)
+
+        want_max = bool(self.library.get("window_maximized", False))
+        # Maximize only after the window is shown: calling showMaximized()
+        # during construction does not snapshot the floating rect as
+        # normalGeometry, so the restore button kept the work-area size.
+        self._pending_maximize = want_max
+        self.titlebar.set_maximized(want_max)
 
     def _target_screen(self):
         geo = self.library.get("window_geometry", "")
@@ -1327,6 +1920,14 @@ class MainWindow(QWidget):
                 save=False,
             )
 
+    def reveal(self) -> None:
+        """Bring a hidden/minimised window back (second-instance handoff)."""
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
     def closeEvent(self, event):  # noqa: N802
         """Hide to the tray instead of quitting, unless quitting for real."""
         self._save_geometry()
@@ -1342,70 +1943,9 @@ class MainWindow(QWidget):
                 self.tray.notify(paths.APP_TITLE,
                                  "已最小化到托盘，播放继续。右键托盘图标可操作。")
             return
-        if self.engine.is_recording:
-            self.engine.stop_recording()
-        self.engine.stop()
+        # Synchronous teardown: no daemon threads racing interpreter exit.
+        self.engine.shutdown()
         self.library.save()
         if self.tray is not None:
             self.tray.hide()
         super().closeEvent(event)
-
-    # -- frameless resize --------------------------------------------------
-    MARGIN = 6
-
-    def _edge_at(self, pos) -> Qt.Edge | None:
-        x, y, w, h = pos.x(), pos.y(), self.width(), self.height()
-        m = self.MARGIN
-        left, right = x <= m, x >= w - m
-        top, bottom = y <= m, y >= h - m
-        if top and left:
-            return Qt.Edge.TopEdge | Qt.Edge.LeftEdge
-        if top and right:
-            return Qt.Edge.TopEdge | Qt.Edge.RightEdge
-        if bottom and left:
-            return Qt.Edge.BottomEdge | Qt.Edge.LeftEdge
-        if bottom and right:
-            return Qt.Edge.BottomEdge | Qt.Edge.RightEdge
-        if left:
-            return Qt.Edge.LeftEdge
-        if right:
-            return Qt.Edge.RightEdge
-        if top:
-            return Qt.Edge.TopEdge
-        if bottom:
-            return Qt.Edge.BottomEdge
-        return None
-
-    def _cursor_for(self, edge) -> Qt.CursorShape:
-        if edge is None:
-            return Qt.CursorShape.ArrowCursor
-        if edge in (Qt.Edge.LeftEdge, Qt.Edge.RightEdge):
-            return Qt.CursorShape.SizeHorCursor
-        if edge in (Qt.Edge.TopEdge, Qt.Edge.BottomEdge):
-            return Qt.CursorShape.SizeVerCursor
-        if edge in (Qt.Edge.TopEdge | Qt.Edge.LeftEdge,
-                    Qt.Edge.BottomEdge | Qt.Edge.RightEdge):
-            return Qt.CursorShape.SizeFDiagCursor
-        return Qt.CursorShape.SizeBDiagCursor
-
-    def mouseMoveEvent(self, event):  # noqa: N802
-        if self.isMaximized():
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-            return
-        edge = self._edge_at(event.position().toPoint())
-        self.setCursor(self._cursor_for(edge))
-
-    def mousePressEvent(self, event):  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and not self.isMaximized():
-            edge = self._edge_at(event.position().toPoint())
-            if edge is not None:
-                handle = self.windowHandle()
-                if handle is not None:
-                    handle.startSystemResize(edge)
-                    event.accept()
-                    return
-        super().mousePressEvent(event)
-
-    def leaveEvent(self, event):  # noqa: N802
-        self.setCursor(Qt.CursorShape.ArrowCursor)
-        super().leaveEvent(event)

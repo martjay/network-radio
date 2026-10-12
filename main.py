@@ -314,7 +314,73 @@ def run_rectest(app: QApplication) -> int:
     return app.exec()
 
 
+def _install_crash_logging() -> None:
+    """Route Python and native crash traces to a log file.
+
+    A windowed frozen build has no console, so without this the only symptom
+    of a crash is the process silently disappearing. `faulthandler` also
+    captures native faults (access violations inside the Qt/FFmpeg DLLs),
+    which are otherwise impossible to diagnose after the fact.
+
+    Logs live next to the user data: `<app dir>/logs/crash.log`, with the
+    previous run preserved as `crash-prev.log`.
+    """
+    import faulthandler
+    import threading
+    import traceback
+
+    try:
+        log_dir = os.path.join(paths.app_dir(), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "crash.log")
+        prev = os.path.join(log_dir, "crash-prev.log")
+        try:
+            if os.path.isfile(log_path) and os.path.getsize(log_path) > 0:
+                os.replace(log_path, prev)
+        except OSError:
+            pass
+        fh = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+    except OSError:
+        # No writable log location; crash logging is best-effort by design.
+        return
+
+    import datetime
+    fh.write(f"\n===== BROADCAST start {datetime.datetime.now():%Y-%m-%d %H:%M:%S} "
+             f"(frozen={paths.is_frozen()}) =====\n")
+    faulthandler.enable(file=fh)
+
+    def _excepthook(exc_type, exc, tb):
+        try:
+            fh.write("--- unhandled exception ---\n")
+            fh.writelines(traceback.format_exception(exc_type, exc, tb))
+            fh.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _threading_hook(args):
+        try:
+            fh.write(f"--- unhandled exception in thread {args.thread.name} ---\n")
+            fh.writelines(
+                traceback.format_exception(args.exc_type, args.exc_value,
+                                           args.exc_traceback))
+            fh.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    sys.excepthook = _excepthook
+    threading.excepthook = _threading_hook
+
+    # In a windowed frozen build sys.stdout/sys.stderr are None, and any
+    # library calling print() would raise inside whatever slot triggered it.
+    # Give them somewhere harmless to go.
+    if sys.stdout is None:
+        sys.stdout = fh
+    if sys.stderr is None:
+        sys.stderr = fh
+
+
 def main() -> int:
+    _install_crash_logging()
     _configure_dpi()
     app = QApplication(sys.argv)
     app.setApplicationName(paths.APP_NAME)
@@ -343,8 +409,44 @@ def main() -> int:
     if "--rectest" in sys.argv:
         return run_rectest(app)
 
+    # Closing the window hides to the tray by default. A second launch must
+    # raise that instance instead of stacking another MainWindow.
+    _cli = {"--selftest", "--playtest", "--rectest", "--screenshot"}
+    if not _cli.intersection(sys.argv):
+        from PySide6.QtNetwork import QLocalServer, QLocalSocket
+
+        sock_name = f"{paths.APP_NAME}-single-instance"
+        probe = QLocalSocket()
+        probe.connectToServer(sock_name)
+        if probe.waitForConnected(200):
+            probe.write(b"raise\n")
+            probe.waitForBytesWritten(300)
+            probe.disconnectFromServer()
+            return 0
+
     window = MainWindow()
     window.show()
+
+    if not _cli.intersection(sys.argv):
+        from PySide6.QtNetwork import QLocalServer
+
+        sock_name = f"{paths.APP_NAME}-single-instance"
+        server = QLocalServer(window)
+        QLocalServer.removeServer(sock_name)
+        server.listen(sock_name)
+
+        def _raise_existing():
+            conn = server.nextPendingConnection()
+            if conn is not None:
+                conn.readAll()
+                conn.close()
+            window.reveal()
+
+        server.newConnection.connect(_raise_existing)
+    # Belt and braces: if the process quits without a closeEvent (session
+    # logout, QApplication.quit() from elsewhere), still stop playback and
+    # recording synchronously instead of leaving daemon threads behind.
+    app.aboutToQuit.connect(window.engine.shutdown)
 
     if "--screenshot" in sys.argv:
         from PySide6.QtCore import QTimer

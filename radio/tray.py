@@ -30,11 +30,18 @@ class TrayController(QObject):
         self.title = title
         self.available = QSystemTrayIcon.isSystemTrayAvailable()
 
-        self.icon = QSystemTrayIcon(appicon.tray_icon(), self)
+        self.icon = QSystemTrayIcon(appicon.tray_icon(theme.TEXT_FAINT), self)
         self.icon.setToolTip(title)
 
         self.menu = QMenu()
         self.menu.setStyleSheet(theme.stylesheet())
+
+        # Disabled header row mirroring what is playing, so the menu answers
+        # "what is on right now" without restoring the window.
+        self._act_status = QAction("未在播放", self)
+        self._act_status.setEnabled(False)
+        self.menu.addAction(self._act_status)
+        self.menu.addSeparator()
 
         self._act_show = self._action("显示主窗口", self.show_requested, icon="external")
         self.menu.addAction(self._act_show)
@@ -88,15 +95,32 @@ class TrayController(QObject):
             self.icon.showMessage(title, message,
                                   QSystemTrayIcon.MessageIcon.NoIcon, 4000)
 
-    def set_playing(self, station: str, track: str = "", playing: bool = False) -> None:
+    def set_playing(self, station: str, track: str = "", playing: bool = False,
+                    state: str = "") -> None:
         lines = [self.title]
         if station:
-            lines.append(("播放中 · " if playing else "已暂停 · ") + station)
+            if state in ("playing", "buffering") or (not state and playing):
+                label = "播放中"
+            elif state == "connecting":
+                label = "正在连接"
+            elif state == "error":
+                label = "出错"
+            else:
+                label = "已停止"
+            lines.append(f"{label} · {station}")
         if track:
             lines.append(track)
         self.icon.setToolTip("\n".join(lines))
+        # The menu header mirrors the tooltip's most useful line.
+        header = station or "未在播放"
+        if track:
+            header = f"{station} — {track}" if station else track
+        # Tray menus render one line; keep the header short enough to read.
+        self._act_status.setText(header if len(header) <= 42 else header[:41] + "…")
 
     def set_state(self, playing: bool, recording: bool, is_favorite: bool) -> None:
+        # The mark itself tells idle from live at a glance in the tray.
+        self.icon.setIcon(appicon.tray_icon(theme.ACCENT if playing else theme.TEXT_FAINT))
         self._act_play.setText("暂停" if playing else "播放")
         from . import icons
         self._act_play.setIcon(icons.icon("pause" if playing else "play", 14, theme.TEXT_DIM))

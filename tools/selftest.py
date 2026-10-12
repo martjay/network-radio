@@ -139,6 +139,8 @@ def main() -> int:
     check("aac auto-selects aac", Recorder.best_container("aac", "mp3"), "aac")
     check("mp3 keeps requested mp3", Recorder.best_container("mp3", "mp3"), "mp3")
     check("flac keeps requested flac", Recorder.best_container("flac", "flac"), "flac")
+    check("wav request not remapped to mp3", Recorder.best_container("mp3", "wav"), "wav")
+    check("flac request not remapped to mp3", Recorder.best_container("mp3", "flac"), "flac")
     check("wav forces transcode", COPY_COMPATIBLE["wav"], set())
     check("source_format maps opus->ogg", Recorder.source_format("opus"), "ogg")
     check("source_format maps vorbis->ogg", Recorder.source_format("vorbis"), "ogg")
