@@ -448,7 +448,12 @@ def main() -> int:
     # Belt and braces: if the process quits without a closeEvent (session
     # logout, QApplication.quit() from elsewhere), still stop playback and
     # recording synchronously instead of leaving daemon threads behind.
-    app.aboutToQuit.connect(window.engine.shutdown)
+    def _cleanup_on_quit() -> None:
+        window.engine.shutdown()
+        from radio.winjob import kill_descendants
+        kill_descendants()
+
+    app.aboutToQuit.connect(_cleanup_on_quit)
 
     if "--screenshot" in sys.argv:
         from PySide6.QtCore import QTimer

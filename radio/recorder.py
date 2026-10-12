@@ -463,6 +463,11 @@ class Recorder:
                         stderr=subprocess.DEVNULL,
                         creationflags=CREATE_NO_WINDOW,
                     )
+                    try:
+                        from .winjob import assign_pid
+                        assign_pid(self._proc.pid)
+                    except Exception:  # noqa: BLE001
+                        pass
                 except Exception as exc:  # noqa: BLE001
                     self.error = f"无法启动 ffmpeg: {exc}"
                     return

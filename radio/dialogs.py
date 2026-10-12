@@ -30,24 +30,21 @@ class DialogBase(QDialog):
 
     def __init__(self, parent=None, title: str = "", width: int = 520, height: int = 0):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("Root")
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.MSWindowsFixedSizeDialogHint
+        )
         self.setModal(True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setStyleSheet(theme.stylesheet())
-        self._drag: object = None
+        self._drag = None
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        self.frame = QWidget()
-        self.frame.setObjectName("Root")
-        self.frame.setStyleSheet(f"QWidget#Root {{ background: {theme.BG_APP}; border: 1px solid {theme.STROKE_STRONG}; }}")
-        outer.addWidget(self.frame)
-
-        root = QVBoxLayout(self.frame)
-        root.setContentsMargins(0, 0, 0, 0)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(1, 1, 1, 1)
         root.setSpacing(0)
+        self.frame = self
 
         bar = QWidget()
         bar.setObjectName("TitleBar")
@@ -90,14 +87,31 @@ class DialogBase(QDialog):
             self.setFixedHeight(height)
         bar.mousePressEvent = self._bar_press
         bar.mouseMoveEvent = self._bar_move
+        bar.mouseReleaseEvent = self._bar_release
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        theme.apply_native_corners(self, rounded=True)
 
     def _bar_press(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.startSystemMove()
+            event.accept()
+            return
+        self._drag = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        event.accept()
 
     def _bar_move(self, event):
         if self._drag is not None and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag)
+            event.accept()
+
+    def _bar_release(self, event):
+        self._drag = None
+        event.accept()
 
     def add_footer_stretch(self) -> None:
         self.footer_lay.addStretch(1)

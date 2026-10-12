@@ -709,3 +709,20 @@ QMenu::separator {{
     margin: 4px 6px;
 }}
 """
+
+
+def apply_native_corners(widget, rounded: bool = True) -> None:
+    """Win11 small rounded corners on a frameless HWND. No-op elsewhere."""
+    import sys
+
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        hwnd = int(widget.winId())
+        # DWMWA_WINDOW_CORNER_PREFERENCE: 1 = DONOTROUND, 3 = ROUNDSMALL
+        pref = ctypes.c_int(3 if rounded else 1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+    except Exception:
+        pass

@@ -698,6 +698,11 @@ class FfmpegReader:
             bufsize=0,
             creationflags=creationflags,
         )
+        try:
+            from .winjob import assign_pid
+            assign_pid(proc.pid)
+        except Exception:  # noqa: BLE001
+            pass
 
         def drain() -> None:
             try:

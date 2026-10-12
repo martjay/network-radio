@@ -1735,16 +1735,7 @@ class MainWindow(QWidget):
         if lay is not None:
             m = 0 if flush else 1
             lay.setContentsMargins(m, m, m, m)
-        if sys.platform != "win32":
-            return
-        try:
-            import ctypes
-            hwnd = int(self.winId())
-            # DWMWA_WINDOW_CORNER_PREFERENCE (Win11). No-op on older builds.
-            pref = ctypes.c_int(1 if flush else 3)  # DONOTROUND / ROUNDSMALL
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
-        except Exception:
-            pass
+        theme.apply_native_corners(self, rounded=not flush)
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
@@ -1821,7 +1812,14 @@ class MainWindow(QWidget):
 
     def _quit_from_tray(self) -> None:
         self._really_quit = True
+        from PySide6.QtWidgets import QApplication
+        from .winjob import hard_exit
+
+        QTimer.singleShot(2500, lambda: hard_exit(0))
         self.close()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _sync_tray(self) -> None:
         if self.tray is None or not self.tray.available:
@@ -1954,6 +1952,9 @@ class MainWindow(QWidget):
                                  "已最小化到托盘，播放继续。右键托盘图标可操作。")
             return
         # Synchronous teardown: no daemon threads racing interpreter exit.
+        from .winjob import hard_exit, kill_descendants
+
+        QTimer.singleShot(2500, lambda: hard_exit(0))
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
@@ -1963,5 +1964,8 @@ class MainWindow(QWidget):
         if self.tray is not None:
             self.tray.hide()
         self.engine.shutdown()
+        kill_descendants()
         self.library.save()
         super().closeEvent(event)
+        if app is not None:
+            app.quit()
