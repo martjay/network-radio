@@ -8,7 +8,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QRadioButton, QStackedWidget, QVBoxLayout, QWidget,
+    QPushButton, QRadioButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import icons, paths, theme
@@ -289,7 +289,7 @@ class PreferencesDialog(DialogBase):
              ("interface", "界面", "grid"), ("about", "关于", "info")]
 
     def __init__(self, parent, library, engine):
-        super().__init__(parent, "设置", width=700, height=520)
+        super().__init__(parent, "设置", width=700, height=600)
         self.library = library
         self.engine = engine
         self._reset_done = False
@@ -344,11 +344,18 @@ class PreferencesDialog(DialogBase):
 
     # -- helpers -----------------------------------------------------------
     def _page(self) -> tuple[QWidget, QVBoxLayout]:
-        page = QWidget()
-        lay = QVBoxLayout(page)
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
         lay.setContentsMargins(20, 6, 20, 6)
         lay.setSpacing(10)
-        return page, lay
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        inner.setStyleSheet("background: transparent;")
+        return scroll, lay
 
     def _heading(self, text: str) -> QLabel:
         lab = QLabel(text)
