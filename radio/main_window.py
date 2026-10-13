@@ -203,6 +203,11 @@ class MainWindow(QWidget):
         self._refresh_sidebar_counts()
         self._update_status()
         self._update_proxy_indicator()
+        self._proxy_fp = self.library.proxy_config().route_key()
+        self._proxy_watch = QTimer(self)
+        self._proxy_watch.setInterval(3000)
+        self._proxy_watch.timeout.connect(self._follow_system_proxy)
+        self._proxy_watch.start()
         self._restore_last_station()
 
         self._clock = QTimer(self)
@@ -1109,9 +1114,28 @@ class MainWindow(QWidget):
             f"收藏 {stats['favorites']} · 覆盖 {stats['countries']} 个国家/地区"
         )
 
+    def _follow_system_proxy(self) -> None:
+        """Keep auto mode in sync with the OS: drop to direct when the system
+        proxy vanishes, and pick it up again when it comes back."""
+        from .proxy import MODE_SYSTEM
+
+        if self.library.get("proxy_mode", MODE_SYSTEM) != MODE_SYSTEM:
+            return
+        cfg = self.library.proxy_config()
+        key = cfg.route_key()
+        if key == self._proxy_fp:
+            return
+        self._proxy_fp = key
+        self.engine.set_proxy(cfg)
+        self._update_proxy_indicator()
+        if self.engine.station and self.engine.state in (
+            "playing", "buffering", "connecting", "error",
+        ):
+            self.engine.tune(dict(self.engine.station))
+
     def _update_proxy_indicator(self) -> None:
         """Keep the active proxy visible; unreachable stations are often a proxy issue."""
-        cfg = self.engine.proxy
+        cfg = self.library.proxy_config()
         if cfg is None or cfg.mode == "none":
             self._proxy_btn.setText("  代理：关闭")
             self._proxy_btn.setIcon(icons.icon("globe", 12, theme.TEXT_MUTED))
@@ -1475,6 +1499,7 @@ class MainWindow(QWidget):
         if dlg.exec():
             dlg.apply()
             self.engine.set_proxy(self.library.proxy_config())
+            self._proxy_fp = self.library.proxy_config().route_key()
             self._update_proxy_indicator()
             self._fav_chip.setChecked(bool(self.library.get("favorites_only", False)))
             self._zh_chip.setChecked(bool(self.library.get("zh_only", False)))

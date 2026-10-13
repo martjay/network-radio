@@ -101,6 +101,12 @@ class ProxyConfig:
             return False
         return not _is_bypassed(host, self.bypass)
 
+    def route_key(self) -> tuple:
+        """Identity of the actual traffic path (direct vs host:port)."""
+        if not self.usable:
+            return (self.mode, "", 0, "")
+        return (self.mode, self.scheme, self.host, int(self.port or 0))
+
     # -- presentation ------------------------------------------------------
     def describe(self) -> str:
         if self.mode == MODE_NONE:

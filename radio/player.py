@@ -154,9 +154,11 @@ class PlayerEngine(QObject):
         url = station.get("url", "")
         rec_dir = paths.recordings_dir(self.settings.get("recordings_dir") or "")
         want_rec = bool(self.settings.get("auto_record", False)) or resume_rec
+        self._refresh_system_proxy()
+        proxy = self.proxy
 
         def work():
-            relay = Relay(url, station_id=station.get("id", ""), proxy=self.proxy)
+            relay = Relay(url, station_id=station.get("id", ""), proxy=proxy)
             try:
                 local = relay.start()
             except Exception as exc:  # noqa: BLE001
@@ -629,6 +631,18 @@ class PlayerEngine(QObject):
     # ------------------------------------------------------------------ #
     #  proxy
     # ------------------------------------------------------------------ #
+    def _refresh_system_proxy(self) -> None:
+        """Re-read OS proxy when mode is follow-system, so retries are not stuck
+        on a tunnel that the user has already turned off."""
+        from .proxy import MODE_SYSTEM, system_proxy
+
+        cfg = self.proxy
+        if cfg is None or cfg.mode != MODE_SYSTEM:
+            return
+        fresh = system_proxy()
+        fresh.mode = MODE_SYSTEM
+        self.proxy = fresh
+
     def set_proxy(self, cfg: ProxyConfig | None) -> None:
         """Apply a proxy setting. Takes effect on the next tune."""
         self.proxy = cfg

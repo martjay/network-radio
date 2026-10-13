@@ -21,7 +21,7 @@ SERVERS = (
     "https://at1.api.radio-browser.info",
     "https://fi1.api.radio-browser.info",
 )
-UA = "BROADCAST/1.0.4 (https://github.com/martjay/network-radio)"
+UA = "BROADCAST/1.0.5 (https://github.com/martjay/network-radio)"
 
 
 def _norm_name(name: str) -> str:
