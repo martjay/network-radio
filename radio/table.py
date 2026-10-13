@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import icons, theme
+from .taxonomy import GENRE_ZH
 
 STATION_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -37,15 +38,6 @@ HEADERS = [
     ("信号", 62, "signal"),
     ("", 34, "fav"),
 ]
-
-GENRE_ZH = {
-    "news": "新闻资讯", "classical": "古典音乐", "jazz": "爵士蓝调",
-    "electronic": "电子舞曲", "chill": "氛围休闲", "rock": "摇滚金属",
-    "pop": "流行金曲", "urban": "嘻哈节奏", "folk": "民谣乡村",
-    "world": "世界拉丁", "oldies": "怀旧年代", "screen": "影视原声",
-    "sport": "体育赛事", "culture": "文化谈话", "varied": "综合电台",
-}
-
 
 def signal_bars(bitrate: int) -> int:
     if bitrate >= 256:

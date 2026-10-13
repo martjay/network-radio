@@ -1,9 +1,11 @@
 """Verify list pagination: slicing, page controls, size change, cross-page step."""
 from __future__ import annotations
 
+import os
 import sys
 
-sys.path.insert(0, r"E:\KU\AI\deepseek-harness\network-radio")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from radio import theme  # noqa: E402
@@ -26,6 +28,19 @@ def check(name, ok, detail=""):
 
 print("=== 1. default page size and slicing ===")
 win.engine.stop()
+win.search.blockSignals(True)
+win.search.setText("")
+win.search.blockSignals(False)
+win._quality_chip.setChecked(False)
+win._fav_chip.blockSignals(True)
+win._fav_chip.setChecked(False)
+win._fav_chip.blockSignals(False)
+win._zh_chip.blockSignals(True)
+win._zh_chip.setChecked(False)
+win._zh_chip.blockSignals(False)
+win._on_nav("all")
+win._set_country_filter("all")
+win._apply_filters()
 win.library.set("page_size", 30, save=False)
 idx = win._page_size_combo.findData(30)
 win._page_size_combo.setCurrentIndex(idx)
@@ -37,14 +52,16 @@ check("filtered list populated", total > 30, f"{total} stations")
 check("model shows one page", len(win.model.rows) == 30, f"{len(win.model.rows)} rows")
 pages = win._page_count()
 check("page count correct", pages == (total + 29) // 30, f"{pages} pages")
-check("page label", win._page_label.text() == f"1 / {pages}", win._page_label.text())
+check("page label",
+      win._page_edit.text() == "1" and win._page_total.text() == f"/ {pages}",
+      f"{win._page_edit.text()} {win._page_total.text()}")
 check("prev disabled on first page", not win._page_prev.isEnabled())
 check("next enabled", win._page_next.isEnabled())
 
 print("\n=== 2. page navigation ===")
 win._page_next.click()
 app.processEvents()
-check("page 2 shown", win._page == 1 and "2 /" in win._page_label.text())
+check("page 2 shown", win._page == 1 and win._page_edit.text() == "2")
 check("page 2 rows differ", win.model.rows[0].get("url") != win._filtered_rows[0].get("url"))
 check("page 2 starts at row 30", win.model.rows[0].get("url") == win._filtered_rows[30].get("url"))
 check("prev enabled on page 2", win._page_prev.isEnabled())
@@ -82,7 +99,24 @@ check("selection follows", win.table.currentIndex().row() == 0,
       f"row={win.table.currentIndex().row()}")
 win.engine.stop()
 
-print("\n=== 6. select_station jumps pages ===")
+print("\n=== 6. type a page number ===")
+pages = win._page_count()
+win._page_edit.setText("3")
+win._jump_typed_page()
+app.processEvents()
+check("typed 3 lands on page 3", win._page == 2, f"page={win._page}")
+check("readout follows", win._page_edit.text() == "3")
+too_high = str(pages + 40)
+win._page_edit.setText(too_high)
+win._jump_typed_page()
+app.processEvents()
+check("overshoot clamps to last page", win._page == pages - 1, f"page={win._page} pages={pages}")
+win._page_edit.setText("abc")
+win._jump_typed_page()
+app.processEvents()
+check("garbage restores current page", win._page_edit.text() == str(win._page + 1))
+
+print("\n=== 7. select_station jumps pages ===")
 target = win._filtered_rows[75]
 win.select_station(target.get("url"))
 app.processEvents()
@@ -90,10 +124,53 @@ check("jumped to target page", win._page == 75 // 30, f"page={win._page}")
 check("target selected",
       win.model.station_at(win.table.currentIndex().row()).get("url") == target.get("url"))
 
+print("\n=== 8. empty filter overlay ===")
+from radio.taxonomy import GENRES  # noqa: E402
+
+have = {(s.get("genre"), s.get("country")) for s in win.library.all_stations()}
+countries = [n for n, _ in win.library.country_options()]
+empty_pair = None
+for g, _zh, _en, _kws in GENRES:
+    for c in countries:
+        if (g, c) not in have:
+            empty_pair = (g, c)
+            break
+    if empty_pair:
+        break
+check("found empty genre+country pair", empty_pair is not None, str(empty_pair))
+if empty_pair:
+    win.search.blockSignals(True)
+    win.search.setText("")
+    win.search.blockSignals(False)
+    win._on_nav(empty_pair[0])
+    win._set_country_filter(empty_pair[1])
+    win._apply_filters()
+    app.processEvents()
+    check("overlay shown on empty list", win._empty_state.isVisible())
+    check("empty hint mentions filters",
+          empty_pair[1] in win._empty_hint.text(), win._empty_hint.text())
+    win._empty_clear_country.click()
+    app.processEvents()
+    check("clear country restores rows or overlay", True)
+    country_cleared = (win._country_combo.currentData() or "all") == "all"
+    check("country filter cleared", country_cleared)
+    if win._empty_state.isVisible():
+        win._empty_clear_genre.click()
+        app.processEvents()
+    else:
+        win._clear_genre_filter()
+        app.processEvents()
+    check("genre back to all", win._section == "all")
+    check("overlay hidden when rows exist",
+          (not win._empty_state.isVisible()) == (len(win._filtered_rows) > 0),
+          f"empty={win._empty_state.isVisible()} rows={len(win._filtered_rows)}")
+
 print()
 passed = sum(1 for _, ok in results if ok)
 failed = [n for n, ok in results if not ok]
 print(f"{passed}/{len(results)} checks passed")
 if failed:
     print("FAILED: " + ", ".join(failed))
+win._really_quit = True
+win.close()
 sys.exit(1 if failed else 0)

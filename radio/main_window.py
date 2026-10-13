@@ -8,8 +8,8 @@ import time
 from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QPainter
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu,
-    QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QMenu, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from . import appicon, icons, paths, theme
@@ -23,8 +23,9 @@ from .table import GENRE_ZH, StationModel, StationTable
 from .tray import TrayController
 from .widgets import (
     Chip, ElideLabel, IconButton, KeyValueRow, LevelMeter, NavItem,
-    PlayingIndicator, ScrollingLabel, SearchField, SpectrumWidget, StatRow,
-    TextButton, TransportButton, VolumeControl, hline, section_label, vline,
+    PlayingIndicator, ScrollComboBox, ScrollingLabel, SearchField,
+    SpectrumWidget, StatRow, TextButton, TransportButton, VolumeControl,
+    hline, section_label, vline,
 )
 
 
@@ -299,7 +300,7 @@ class MainWindow(QWidget):
 
         lay.addSpacing(6)
         lay.addWidget(self._padded(section_label("地区 / REGION")))
-        self._country_combo = QComboBox()
+        self._country_combo = ScrollComboBox()
         self._country_combo.setObjectName("Field")
         self._country_combo.addItem("全部地区", "all")
         for name, count in self.library.country_options():
@@ -310,7 +311,13 @@ class MainWindow(QWidget):
         wrap = QWidget()
         wl = QHBoxLayout(wrap)
         wl.setContentsMargins(10, 0, 10, 0)
-        wl.addWidget(self._country_combo)
+        wl.setSpacing(4)
+        wl.addWidget(self._country_combo, 1)
+        self._country_clear = TextButton("清除", tooltip="取消国家过滤")
+        self._country_clear.setFixedHeight(26)
+        self._country_clear.setVisible(False)
+        self._country_clear.clicked.connect(self._clear_country_filter)
+        wl.addWidget(self._country_clear)
         lay.addWidget(wrap)
 
         lay.addSpacing(4)
@@ -331,6 +338,33 @@ class MainWindow(QWidget):
         lay.addWidget(widget)
         return wrap
 
+    def _build_empty_state(self) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("EmptyState")
+        panel.hide()
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(16)
+        lay.addStretch(1)
+        self._empty_hint = QLabel("没有符合当前筛选的电台")
+        self._empty_hint.setObjectName("EmptyHint")
+        self._empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_hint.setWordWrap(True)
+        lay.addWidget(self._empty_hint)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addStretch(1)
+        self._empty_clear_genre = TextButton("清空分类过滤", tooltip="回到全部电台")
+        self._empty_clear_genre.clicked.connect(self._clear_genre_filter)
+        row.addWidget(self._empty_clear_genre)
+        self._empty_clear_country = TextButton("清空国家过滤", tooltip="回到全部地区")
+        self._empty_clear_country.clicked.connect(self._clear_country_filter)
+        row.addWidget(self._empty_clear_country)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addStretch(1)
+        return panel
+
     # ---------------------------------------------------------------- center
     def _build_center(self) -> QWidget:
         center = QWidget()
@@ -345,7 +379,15 @@ class MainWindow(QWidget):
 
         self.model = StationModel(self.library, self)
         self.table = StationTable(self.model, self)
-        lay.addWidget(self.table, 1)
+        holder = QWidget()
+        holder.setObjectName("ListHolder")
+        grid = QGridLayout(holder)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(0)
+        grid.addWidget(self.table, 0, 0)
+        self._empty_state = self._build_empty_state()
+        grid.addWidget(self._empty_state, 0, 0)
+        lay.addWidget(holder, 1)
 
         lay.addWidget(hline(theme.STROKE))
         lay.addWidget(self._build_pager())
@@ -384,12 +426,24 @@ class MainWindow(QWidget):
 
         cl.addWidget(vline(theme.STROKE))
 
-        self._page_label = QLabel("1 / 1")
-        self._page_label.setObjectName("PagerReadout")
-        self._page_label.setFont(theme.font(11, 600, mono=True))
-        self._page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._page_label.setFixedWidth(72)
-        cl.addWidget(self._page_label)
+        self._page_edit = QLineEdit("1")
+        self._page_edit.setObjectName("PagerJump")
+        self._page_edit.setFont(theme.font(11, 600, mono=True))
+        self._page_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._page_edit.setFixedWidth(40)
+        self._page_edit.setMaxLength(5)
+        self._page_edit.setToolTip("输入页码，回车直达")
+        self._page_edit.returnPressed.connect(self._jump_typed_page)
+        self._page_edit.editingFinished.connect(self._jump_typed_page)
+        self._page_edit.installEventFilter(self)
+        cl.addWidget(self._page_edit)
+
+        self._page_total = QLabel("/ 1")
+        self._page_total.setObjectName("PagerReadout")
+        self._page_total.setFont(theme.font(11, 600, mono=True))
+        self._page_total.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self._page_total.setFixedWidth(52)
+        cl.addWidget(self._page_total)
 
         cl.addWidget(vline(theme.STROKE))
 
@@ -437,14 +491,17 @@ class MainWindow(QWidget):
         lay.setSpacing(8)
 
         self.search = SearchField()
-        self.search.setFixedWidth(280)
-        lay.addWidget(self.search)
+        self.search.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.search.setMinimumWidth(140)
+        lay.addWidget(self.search, 1)
 
         self._fav_chip = Chip("仅收藏", "只显示已收藏的电台")
+        self._fav_chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._fav_chip.toggled.connect(self._on_fav_filter)
         lay.addWidget(self._fav_chip)
 
         self._zh_chip = Chip("仅中文", "只显示中文电台")
+        self._zh_chip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._zh_chip.toggled.connect(self._on_zh_filter)
         lay.addWidget(self._zh_chip)
 
@@ -641,6 +698,9 @@ class MainWindow(QWidget):
         for key in ("国家", "地区", "语言", "类型", "标签", "投票", "播放次数"):
             row = KeyValueRow(key, "--")
             row.set_hover_tip(key == "标签")
+            if key in ("国家", "地区", "语言", "类型", "标签"):
+                row.set_filterable(True)
+                row.clicked.connect(self._on_info_filter)
             self._info_rows[key] = row
             lay.addWidget(row)
 
@@ -776,7 +836,7 @@ class MainWindow(QWidget):
         self.engine.buffer_health.connect(self._buffer_bar.set_value)
         self.library.favorites_changed.connect(self._on_favorites_changed)
         self.library.custom_changed.connect(lambda: self._apply_filters())
-        self.library.catalogue_changed.connect(lambda: self._apply_filters())
+        self.library.catalogue_changed.connect(self._on_catalogue_changed)
         self.library.history_changed.connect(self._refresh_sidebar_counts)
 
         # shortcuts
@@ -830,6 +890,14 @@ class MainWindow(QWidget):
                 return True
         if et == QEvent.Type.Leave and obj is self and not self._rz_edges:
             self.unsetCursor()
+        if obj is getattr(self, "_page_edit", None) and et == QEvent.Type.FocusIn:
+            QTimer.singleShot(0, self._page_edit.selectAll)
+        if (obj is getattr(self, "_page_edit", None)
+                and et == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Escape):
+            self._sync_page_edit(force=True)
+            self._page_edit.clearFocus()
+            return True
         return super().eventFilter(obj, event)
 
     def _platform_geo(self) -> QRect:
@@ -982,6 +1050,7 @@ class MainWindow(QWidget):
             if country != "all":
                 self.library.set("country", "all", save=False)
         self._country_combo.blockSignals(False)
+        self._sync_country_clear()
 
         muted = bool(self.library.get("muted", False))
         self._volume.set_muted(muted)
@@ -1047,7 +1116,7 @@ class MainWindow(QWidget):
             self.engine.station.get("url", "") if self.engine.state != "idle" else "",
             self.engine.station.get("url", "") if self.engine.state == "connecting" else "",
         )
-        self._page_label.setText(f"{self._page + 1} / {pages}")
+        self._sync_page_edit(pages)
         at_start = self._page <= 0
         at_end = self._page >= pages - 1
         self._page_first.setEnabled(not at_start)
@@ -1061,10 +1130,32 @@ class MainWindow(QWidget):
             lo = start + 1
             hi = min(start + size, total)
             self._page_range.setText(f"{lo}–{hi}  ·  {total}")
+        self._sync_empty_state()
+
+    def _sync_page_edit(self, pages: int | None = None, force: bool = False) -> None:
+        pages = self._page_count() if pages is None else pages
+        self._page_total.setText(f"/ {pages}")
+        if self._page_edit.hasFocus() and not force:
+            return
+        self._page_edit.blockSignals(True)
+        self._page_edit.setText(str(self._page + 1))
+        self._page_edit.blockSignals(False)
+
+    def _jump_typed_page(self) -> None:
+        raw = self._page_edit.text().strip()
+        pages = self._page_count()
+        if not raw.isdigit():
+            self._sync_page_edit(pages, force=True)
+            return
+        wanted = max(1, min(int(raw), pages))
+        self._goto_page(wanted - 1)
+        self._sync_page_edit(pages, force=True)
 
     def _goto_page(self, page: int) -> None:
         page = max(0, min(page, self._page_count() - 1))
         if page == self._page:
+            if not self._page_edit.hasFocus():
+                self._sync_page_edit()
             return
         self._page = page
         self._show_page()
@@ -1093,6 +1184,23 @@ class MainWindow(QWidget):
                 break
         self.table.select_url(url)
 
+    def _on_catalogue_changed(self) -> None:
+        self._refresh_country_combo()
+        self._refresh_sidebar_counts()
+        self._apply_filters(keep_page=True)
+
+    def _refresh_country_combo(self) -> None:
+        current = self._country_combo.currentData()
+        self._country_combo.blockSignals(True)
+        self._country_combo.clear()
+        self._country_combo.addItem("全部地区", "all")
+        for name, count in self.library.country_options():
+            self._country_combo.addItem(f"{name}  ({count})", name)
+        idx = self._country_combo.findData(current)
+        self._country_combo.setCurrentIndex(max(0, idx))
+        self._country_combo.blockSignals(False)
+        self._sync_country_clear()
+
     def _refresh_sidebar_counts(self) -> None:
         counts = {
             "all": len(self.library.stations) + len(self.library.custom),
@@ -1102,6 +1210,8 @@ class MainWindow(QWidget):
             "custom": len(self.library.custom),
             "zh": sum(1 for s in self.library.all_stations() if s.get("zh")),
         }
+        for key, zh, en, count in self.library.genre_options():
+            counts[key] = count
         for key, item in self._nav_items.items():
             if key in counts:
                 item.set_count(counts[key])
@@ -1179,15 +1289,17 @@ class MainWindow(QWidget):
             self._show_station_detail(station)
 
     def _show_station_detail(self, station: dict) -> None:
+        from .geo import country_zh, language_zh
+
         name = station.get("name", "")
-        country = station.get("country", "") or "未知"
+        country = country_zh(station.get("cc", ""), station.get("country", "") or "未知")
         genre = GENRE_ZH.get(station.get("genre", ""), station.get("genre", ""))
+        lang = language_zh(station.get("language", "") or "") or (station.get("language") or "--")
         self._np_title.setText(name)
         self._np_sub.setText(" · ".join([b for b in [country, genre] if b]))
-
         self._info_rows["国家"].set_value(country)
         self._info_rows["地区"].set_value(station.get("state", "") or "--")
-        self._info_rows["语言"].set_value(station.get("language", "") or "--")
+        self._info_rows["语言"].set_value(lang)
         self._info_rows["类型"].set_value(genre)
         self._info_rows["标签"].set_value(station.get("tags", "") or "--")
         votes = int(station.get("votes") or 0)
@@ -1593,7 +1705,97 @@ class MainWindow(QWidget):
     def _on_country(self) -> None:
         country = self._country_combo.currentData() or "all"
         self.library.set("country", country, save=False)
+        self._sync_country_clear()
         self._apply_filters()
+
+    def _set_country_filter(self, name: str) -> None:
+        data = "all" if name in ("", "all", None) else name
+        idx = self._country_combo.findData(data)
+        self._country_combo.blockSignals(True)
+        self._country_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._country_combo.blockSignals(False)
+        self.library.set("country", self._country_combo.currentData() or "all", save=False)
+        self._sync_country_clear()
+
+    def _clear_country_filter(self) -> None:
+        self._set_country_filter("all")
+        self._apply_filters()
+
+    def _clear_genre_filter(self) -> None:
+        self._on_nav("all")
+
+    def _sync_empty_state(self) -> None:
+        empty = not self._filtered_rows
+        self._empty_state.setVisible(empty)
+        if not empty:
+            return
+        self._empty_state.raise_()
+        genre = self._section or "all"
+        country = self._country_combo.currentData() or "all"
+        bits = []
+        if genre != "all":
+            nav = self._nav_items.get(genre)
+            bits.append(nav._label if nav else GENRE_ZH.get(genre, genre))
+        if country != "all":
+            bits.append(country)
+        if bits:
+            self._empty_hint.setText(" · ".join(bits) + "  没有电台")
+        else:
+            self._empty_hint.setText("没有符合当前筛选的电台")
+
+    def _sync_country_clear(self) -> None:
+        active = (self._country_combo.currentData() or "all") != "all"
+        self._country_clear.setVisible(active)
+
+    def _on_info_filter(self, key: str) -> None:
+        """Clicking a station-info field applies the matching list filter."""
+        from .geo import country_zh, language_zh
+
+        station = self._current_station() or self.engine.station
+        if not station:
+            return
+        if key == "国家":
+            name = country_zh(station.get("cc", ""), station.get("country") or "")
+            self.search.blockSignals(True)
+            self.search.setText("")
+            self.search.blockSignals(False)
+            self._set_country_filter(name)
+            self._on_nav("all")
+            return
+        if key == "类型":
+            self.search.blockSignals(True)
+            self.search.setText("")
+            self.search.blockSignals(False)
+            self._set_country_filter("all")
+            self._on_nav(station.get("genre") or "varied")
+            return
+        if key == "语言":
+            lang = language_zh(station.get("language") or "") or (station.get("language") or "")
+            token = lang.split("、")[0].strip()
+            if not token:
+                return
+            self._set_country_filter("all")
+            self.search.setText(token)
+            self._on_nav("all")
+            return
+        if key == "地区":
+            state = (station.get("state") or "").strip()
+            if not state or state == "--":
+                return
+            self._set_country_filter(
+                country_zh(station.get("cc", ""), station.get("country") or "")
+            )
+            self.search.setText(state)
+            self._on_nav("all")
+            return
+        if key == "标签":
+            raw = station.get("tags") or ""
+            parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+            if not parts:
+                return
+            self._set_country_filter("all")
+            self.search.setText(parts[0])
+            self._on_nav("all")
 
     def _on_quality(self) -> None:
         self._apply_filters()

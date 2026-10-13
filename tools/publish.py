@@ -19,8 +19,8 @@ import urllib.request
 
 OWNER = "martjay"
 REPO = "network-radio"
-TAG = "v1.0.0"
-ASSET = os.path.join("dist", "Broadcast-1.0.0-win64.zip")
+TAG = "v1.0.6"
+ASSET = os.path.join("dist", "Broadcast-1.0.6-win64.zip")
 API = "https://api.github.com"
 UA = "BroadcastPublisher/1.0"
 
@@ -81,7 +81,7 @@ def push(tok: str) -> None:
     url = f"https://x-access-token:{tok}@github.com/{OWNER}/{REPO}.git"
     # The token goes into a one-shot remote, never into .git/config, and is
     # redacted from all command output.
-    run(["git", "push", url, "main:main", "--force"], secret=tok)
+    run(["git", "push", url, "HEAD:main"], secret=tok)
     run(["git", "push", url, "--tags"], check=False, secret=tok)
     print("  pushed.")
 
@@ -94,12 +94,17 @@ def ensure_release(tok: str) -> int:
         return data["id"]
 
     body = (
-        "## BROADCAST 1.0.0 — 网络收音机\n\n"
+        "## BROADCAST 1.0.6 — 网络收音机\n\n"
         "Windows 免安装版。解压后运行 `Broadcast.exe`，**无需安装 Python**。\n\n"
         "### 下载\n"
-        "`Broadcast-1.0.0-win64.zip` （约 70 MB，解压后 171 MB）\n\n"
+        "`Broadcast-1.0.6-win64.zip`\n\n"
+        "### 这一版\n"
+        "- 电台库同步不设总上限；类型拆细到 21 类（谈话、蓝调、金属、乡村、拉丁、宗教等），一台只进一类\n"
+        "- 国家/语言中文名；点电台信息里的国家、类型、语言、标签即可筛选\n"
+        "- 地区下拉限高带滚动条，可一键清除；空列表中央可清空分类或国家\n"
+        "- 搜索框随工具栏宽度伸缩；分页可输入页码直达\n\n"
         "### 特性\n"
-        "- **820 个电台 / 74 个国家 / 15 个类型**，每条流都经过实际解码验证，无失效链接\n"
+        "- **820 个验证过的核心电台 / 74 个国家 / 21 个类型**，同步后可继续增长\n"
         "- 96 个中文电台：RTHK 1–8、臺北電台、警察廣播電台、河南戏曲广播等\n"
         "- 支持 MP3 / AAC / AAC+ / HLS\n"
         "- **代理**：自动跟随系统代理，也可手动配置 HTTP/HTTPS/SOCKS5（含认证）\n"
@@ -118,7 +123,7 @@ def ensure_release(tok: str) -> int:
     status, data = api("POST", f"/repos/{OWNER}/{REPO}/releases", tok, {
         "tag_name": TAG,
         "target_commitish": "main",
-        "name": "BROADCAST 1.0.0 — 网络收音机",
+        "name": "BROADCAST 1.0.6 — 网络收音机",
         "body": body,
         "draft": False,
         "prerelease": False,

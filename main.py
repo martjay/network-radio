@@ -401,6 +401,8 @@ def main() -> int:
     base = theme.font(12, 400)
     app.setFont(base)
     app.setStyleSheet(theme.stylesheet())
+    from radio.widgets import install_hint_tips
+    install_hint_tips(app)
 
     if "--selftest" in sys.argv:
         return run_selftest(app)

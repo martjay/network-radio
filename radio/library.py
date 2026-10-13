@@ -105,6 +105,7 @@ class Library(QObject):
         self.history: list[dict] = []           # most recent first
         self.play_counts: dict[str, int] = {}
         self.url_overrides: list[dict] = []
+        self.catalogue_extra: list[dict] = []
         self.settings: dict = dict(DEFAULTS)
         self._by_url: dict[str, dict] = {}
         self._load_catalogue()
@@ -128,10 +129,72 @@ class Library(QObject):
             "countries": data.get("countries", []),
         }
         self.stations = data.get("stations", [])
+        for s in self.stations:
+            s["custom"] = False
+            s["extra"] = False
+        self._localize_places(self.stations)
+        self._assign_station_ids()
+        self._reindex()
+
+    def _assign_station_ids(self) -> None:
         for i, s in enumerate(self.stations):
             s["id"] = f"s{i}"
             s["custom"] = False
-        self._reindex()
+
+    def _refresh_meta(self) -> None:
+        from .taxonomy import countries_meta, genres_meta
+
+        self.meta["genres"] = genres_meta(self.stations)
+        self.meta["countries"] = countries_meta(self.stations)
+
+    def _reclassify_stations(self) -> None:
+        """Apply the current taxonomy to bundled and synced stations."""
+        from .taxonomy import classify
+
+        for s in self.stations:
+            s["genre"] = classify({
+                "name": s.get("name") or "",
+                "tags": s.get("tags") or "",
+            })
+        self._refresh_meta()
+
+    @staticmethod
+    def _localize_places(rows: list[dict]) -> None:
+        from .geo import country_zh, language_zh
+
+        for s in rows:
+            s["country"] = country_zh(s.get("cc", ""), s.get("country") or "")
+            lang = s.get("language") or ""
+            if lang:
+                s["language"] = language_zh(lang) or lang
+
+    def _merge_extra(self) -> None:
+        """Append previously synced stations onto the bundled snapshot."""
+        from .taxonomy import name_country_key, strip_station, url_key
+
+        have_url = {url_key(s.get("url", "")) for s in self.stations}
+        have_nc = {name_country_key(s.get("name", ""), s.get("cc", "")) for s in self.stations}
+        kept: list[dict] = []
+        for raw in self.catalogue_extra:
+            if not isinstance(raw, dict):
+                continue
+            uk = url_key(raw.get("url", ""))
+            nk = name_country_key(raw.get("name", ""), raw.get("cc", ""))
+            if not uk or uk in have_url:
+                continue
+            if nk[0] and nk in have_nc:
+                continue
+            rec = dict(raw)
+            rec["extra"] = True
+            rec["custom"] = False
+            self._localize_places([rec])
+            self.stations.append(rec)
+            have_url.add(uk)
+            have_nc.add(nk)
+            kept.append(strip_station(rec))
+        self.catalogue_extra = kept
+        self._assign_station_ids()
+        self._refresh_meta()
 
     def _reindex(self) -> None:
         self._by_url = {}
@@ -170,6 +233,7 @@ class Library(QObject):
             self.history = data.get("history", []) or []
             self.play_counts = data.get("play_counts", {}) or {}
             self.url_overrides = data.get("url_overrides", []) or []
+            self.catalogue_extra = data.get("catalogue_extra", []) or []
             stored = data.get("settings", {}) or {}
             for key, value in stored.items():
                 if key in DEFAULTS:
@@ -187,6 +251,9 @@ class Library(QObject):
             s.setdefault("votes", 0)
             s.setdefault("score", 0.0)
             s.setdefault("zh", False)
+        self._localize_places(self.custom)
+        self._merge_extra()
+        self._reclassify_stations()
         self._apply_url_overrides(self.url_overrides)
         self._remap_userdata_urls({
             o.get("from", ""): o.get("to", "")
@@ -211,6 +278,7 @@ class Library(QObject):
                 "history": self.history[:400],
                 "play_counts": self.play_counts,
                 "url_overrides": self.url_overrides,
+                "catalogue_extra": self.catalogue_extra,
                 "settings": self.settings,
             },
             ensure_ascii=False,
@@ -407,9 +475,11 @@ class Library(QObject):
         return rows
 
     def country_options(self) -> list[tuple[str, int]]:
+        from .geo import country_zh
+
         counts: dict[str, int] = {}
         for s in self.stations:
-            name = s.get("country") or "其他"
+            name = country_zh(s.get("cc", ""), s.get("country") or "")
             counts[name] = counts.get(name, 0) + 1
         return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
@@ -444,7 +514,11 @@ class Library(QObject):
         if zh_only and section != "zh":
             rows = [s for s in rows if s.get("zh")]
         if country != "all":
-            rows = [s for s in rows if (s.get("country") or "") == country]
+            from .geo import country_zh
+            rows = [
+                s for s in rows
+                if country_zh(s.get("cc", ""), s.get("country") or "") == country
+            ]
         if min_bitrate > 0:
             rows = [s for s in rows if int(s.get("bitrate") or 0) >= min_bitrate]
         if text:
@@ -454,7 +528,7 @@ class Library(QObject):
                     hay = " ".join([
                         s.get("name", ""), s.get("country", ""), s.get("tags", ""),
                         s.get("language", ""), s.get("state", ""), s.get("genre", ""),
-                    ]).lower()
+                    ]).lower().replace("、", " ")
                     return all(t in hay for t in terms)
                 rows = [s for s in rows if match(s)]
 
@@ -533,6 +607,7 @@ class Library(QObject):
             "generated": self.meta.get("generated", ""),
             "count": len(self.stations),
             "url_overrides": copy.deepcopy(self.url_overrides),
+            "catalogue_extra": copy.deepcopy(self.catalogue_extra),
         }
 
     @staticmethod
@@ -571,6 +646,7 @@ class Library(QObject):
                 "generated": data.get("generated") or "",
                 "count": int(data.get("count") or 0),
                 "overrides": len(data.get("url_overrides") or []),
+                "extra": len(data.get("catalogue_extra") or []),
             })
         return rows
 
@@ -592,6 +668,9 @@ class Library(QObject):
             for s in self.stations
         }
         self._load_catalogue()
+        self.catalogue_extra = copy.deepcopy(data.get("catalogue_extra") or [])
+        self._merge_extra()
+        self._reclassify_stations()
         self.url_overrides = copy.deepcopy(data.get("url_overrides") or [])
         self._apply_url_overrides(self.url_overrides)
         mapping = {}
@@ -616,24 +695,60 @@ class Library(QObject):
 
     def apply_url_patches(self, patches: list[dict]) -> int:
         """Apply radio-browser URL patches to builtin stations and persist them."""
-        if not patches:
-            return 0
+        return self.apply_catalogue_sync(patches, [])["updated"]
+
+    def apply_catalogue_sync(self, patches: list[dict], additions: list[dict]) -> dict:
+        """Patch URLs and append classified extras. Backs up first if anything changes."""
+        from .taxonomy import name_country_key, strip_station, url_key
+
+        patches = [p for p in (patches or []) if p.get("from") and p.get("to")]
+        have_url = {url_key(s.get("url", "")) for s in self.stations}
+        have_nc = {name_country_key(s.get("name", ""), s.get("cc", "")) for s in self.stations}
+        newcomers: list[dict] = []
+        for rec in additions or []:
+            if rec.get("custom"):
+                continue
+            uk = url_key(rec.get("url", ""))
+            nk = name_country_key(rec.get("name", ""), rec.get("cc", ""))
+            if not uk or uk in have_url:
+                continue
+            if nk[0] and nk in have_nc:
+                continue
+            newcomers.append(rec)
+            have_url.add(uk)
+            have_nc.add(nk)
+        if not patches and not newcomers:
+            return {"updated": 0, "added": 0}
         self.backup_catalogue()
-        mapping = {p["from"]: p["to"] for p in patches if p.get("from") and p.get("to")}
-        self._apply_url_overrides(patches)
-        self._remap_userdata_urls(mapping)
-        merged: dict[tuple[str, str], dict] = {
-            ((o.get("name") or ""), (o.get("cc") or "").upper()): o
-            for o in self.url_overrides
-        }
-        for p in patches:
-            merged[((p.get("name") or ""), (p.get("cc") or "").upper())] = p
-        self.url_overrides = list(merged.values())
+        if patches:
+            mapping = {p["from"]: p["to"] for p in patches}
+            self._apply_url_overrides(patches)
+            self._remap_userdata_urls(mapping)
+            merged: dict[tuple[str, str], dict] = {
+                ((o.get("name") or ""), (o.get("cc") or "").upper()): o
+                for o in self.url_overrides
+            }
+            for p in patches:
+                merged[((p.get("name") or ""), (p.get("cc") or "").upper())] = p
+            self.url_overrides = list(merged.values())
+        added = 0
+        for rec in newcomers:
+            row = dict(rec)
+            row["extra"] = True
+            row["custom"] = False
+            self._localize_places([row])
+            self.stations.append(row)
+            added += 1
+        self.catalogue_extra = [
+            strip_station(s) for s in self.stations if s.get("extra")
+        ]
+        self._assign_station_ids()
+        self._reclassify_stations()
         self.meta["generated"] = time.strftime("%Y-%m-%d")
         self._reindex()
         self.save()
         self.catalogue_changed.emit()
-        return len(patches)
+        return {"updated": len(patches), "added": added}
 
     def stats(self) -> dict:
         return {

@@ -9,14 +9,15 @@ from __future__ import annotations
 import math
 import time
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QBrush, QCursor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath,
-    QPen,
+    QBrush, QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QHelpEvent,
+    QLinearGradient, QPainter, QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QSizePolicy, QSlider, QToolTip, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QComboBox, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QListView, QProxyStyle, QPushButton, QSizePolicy, QSlider,
+    QStyle, QStyleFactory, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import icons, theme
@@ -40,6 +41,82 @@ def vline(color: str = theme.STROKE, width: int = 1) -> QFrame:
     return f
 
 
+class _ScrollComboStyle(QProxyStyle):
+    """Force a scrollable combo popup instead of a full-height menu."""
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.StyleHint.SH_ComboBox_Popup:
+            return 0
+        if hint == QStyle.StyleHint.SH_ScrollBar_Transient:
+            return 0
+        return super().styleHint(hint, option, widget, returnData)
+
+
+class ScrollComboBox(QComboBox):
+    """Combo whose popup is height-capped and always shows a vertical scrollbar."""
+
+    popup_cap = 280
+
+    def __init__(self, parent=None, visible_items: int = 12):
+        super().__init__(parent)
+        # Keep style objects alive; Qt does not take ownership of QProxyStyle.
+        self._combo_style = _ScrollComboStyle(QStyleFactory.create("Fusion"))
+        self._bar_style = _ScrollComboStyle(QStyleFactory.create("Fusion"))
+        self.setStyle(self._combo_style)
+        view = QListView(self)
+        view.setObjectName("ComboPopup")
+        view.setUniformItemSizes(True)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        view.setMouseTracking(True)
+        view.setStyleSheet(
+            f"QListView#ComboPopup {{ outline: none; border: none; color: {theme.TEXT}; }}"
+            f"QListView#ComboPopup::item {{ color: {theme.TEXT}; padding: 3px 8px; }}"
+            f"QListView#ComboPopup::item:hover,"
+            f"QListView#ComboPopup::item:selected {{ color: {theme.WARN};"
+            f"  background: {theme.BG_ROW_HOVER}; }}"
+            "QScrollBar:vertical { background: #161a1f; width: 12px; margin: 2px; }"
+            "QScrollBar::handle:vertical { background: #6a7580; min-height: 32px;"
+            "  border-radius: 4px; }"
+            "QScrollBar::handle:vertical:hover { background: #8b96a1; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: #161a1f; }"
+        )
+        self.setView(view)
+        self.setMaxVisibleItems(visible_items)
+
+    def showPopup(self) -> None:
+        super().showPopup()
+        view = self.view()
+        if view is None:
+            return
+        cap = self._popup_cap()
+        container = view.parentWidget()
+        if container is not None and container is not self:
+            container.setMaximumHeight(cap)
+            if container.height() > cap:
+                geo = container.geometry()
+                geo.setHeight(cap)
+                container.setGeometry(geo)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        view.updateGeometries()
+        bar = view.verticalScrollBar()
+        bar.setStyle(self._bar_style)
+
+    def _popup_cap(self) -> int:
+        screen = self.screen()
+        avail = screen.availableGeometry() if screen else QRect(0, 0, 800, 600)
+        below = self.mapToGlobal(self.rect().bottomLeft())
+        above = self.mapToGlobal(self.rect().topLeft())
+        room_below = avail.bottom() - below.y() - 8
+        room_above = above.y() - avail.top() - 8
+        room = max(room_below, room_above, 120)
+        wanted = self.maxVisibleItems() * 24 + 8
+        return min(self.popup_cap, room, wanted)
+
+
 def section_label(text: str, spacing: float = 1.5) -> QLabel:
     lab = QLabel(text.upper())
     lab.setObjectName("SideHeader")
@@ -48,14 +125,203 @@ def section_label(text: str, spacing: float = 1.5) -> QLabel:
 
 
 def show_copy_tip(widget: QWidget, message: str = "已复制") -> None:
-    """Flash a tooltip at the cursor. Deferred so Qt does not replace it
-    with the widget's hover tooltip on mouse-release."""
-    pos = QCursor.pos() + QPoint(14, 18)
+    """Flash a compact hint at the cursor."""
+    pos = QCursor.pos() + QPoint(12, 16)
 
     def _show() -> None:
-        QToolTip.showText(pos, message, widget, QRect(), 1500)
+        hint_tip().popup(message, pos, linger_ms=1400)
 
     QTimer.singleShot(0, _show)
+
+
+class HintTip(QWidget):
+    """Content-sized hover hint, painted so Windows cannot inflate it."""
+
+    _max_w = 240
+    _pad_x = 8
+    _pad_y = 5
+    _radius = 4
+    _gap = 2
+
+    def __init__(self) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint,
+        )
+        self.setObjectName("HintTip")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._title_font = theme.font(11, 500)
+        self._note_font = theme.font(10, 400)
+        self._title_lines: list[str] = []
+        self._note_lines: list[str] = []
+        self._hide = QTimer(self)
+        self._hide.setSingleShot(True)
+        self._hide.timeout.connect(self.hide)
+
+    def popup(self, text: str, pos: QPoint, linger_ms: int = 0) -> None:
+        raw = (text or "").strip()
+        if not raw:
+            self.hide()
+            return
+        parts = [p.strip() for p in raw.split("\n") if p.strip()]
+        title = parts[0] if parts else ""
+        notes = parts[1:]
+        title_fm = QFontMetrics(self._title_font)
+        note_fm = QFontMetrics(self._note_font)
+        inner = self._max_w - self._pad_x * 2
+        self._title_lines = self._wrap(title, title_fm, inner)
+        self._note_lines = []
+        for note in notes:
+            self._note_lines.extend(self._wrap(note, note_fm, inner))
+
+        widths = [title_fm.horizontalAdvance(s) for s in self._title_lines]
+        widths += [note_fm.horizontalAdvance(s) for s in self._note_lines]
+        text_w = max(widths) if widths else 0
+        line_blocks = len(self._title_lines) + len(self._note_lines)
+        extra_gaps = max(0, line_blocks - 1)
+        note_gap = self._gap + 1 if self._title_lines and self._note_lines else 0
+        h = (
+            self._pad_y * 2
+            + title_fm.height() * len(self._title_lines)
+            + note_fm.height() * len(self._note_lines)
+            + extra_gaps * self._gap
+            + note_gap
+        )
+        w = text_w + self._pad_x * 2
+        self.setFixedSize(max(w, 24), max(h, 18))
+
+        geo = QRect(pos, self.size())
+        screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry().adjusted(6, 6, -6, -6)
+            if geo.right() > avail.right():
+                geo.moveRight(avail.right())
+            if geo.bottom() > avail.bottom():
+                geo.moveBottom(pos.y() - 8)
+            if geo.left() < avail.left():
+                geo.moveLeft(avail.left())
+            if geo.top() < avail.top():
+                geo.moveTop(avail.top())
+        self.setGeometry(geo)
+        self.show()
+        self.raise_()
+        self.update()
+        if linger_ms > 0:
+            self._hide.start(linger_ms)
+        else:
+            self._hide.stop()
+
+    @staticmethod
+    def _wrap(text: str, fm: QFontMetrics, max_w: int) -> list[str]:
+        if not text:
+            return []
+        if fm.horizontalAdvance(text) <= max_w:
+            return [text]
+        lines: list[str] = []
+        current = ""
+        for ch in text:
+            trial = current + ch
+            if current and fm.horizontalAdvance(trial) > max_w:
+                lines.append(current)
+                current = ch
+            else:
+                current = trial
+        if current:
+            lines.append(current)
+        return lines
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, self._radius, self._radius)
+        p.fillPath(path, QColor(theme.BG_PANEL_ALT))
+        p.setPen(QPen(QColor(theme.STROKE), 1))
+        p.drawPath(path)
+
+        x = self._pad_x
+        y = self._pad_y
+        title_fm = QFontMetrics(self._title_font)
+        note_fm = QFontMetrics(self._note_font)
+        p.setFont(self._title_font)
+        p.setPen(QColor(theme.TEXT))
+        for line in self._title_lines:
+            y += title_fm.ascent()
+            p.drawText(x, y, line)
+            y += title_fm.descent() + self._gap
+        if self._title_lines and self._note_lines:
+            y += 1
+        p.setFont(self._note_font)
+        p.setPen(QColor(theme.TEXT_FAINT))
+        for line in self._note_lines:
+            y += note_fm.ascent()
+            p.drawText(x, y, line)
+            y += note_fm.descent() + self._gap
+
+
+class _TipFilter(QObject):
+    def __init__(self, tip: HintTip, parent=None):
+        super().__init__(parent)
+        self._tip = tip
+        self._anchor = None
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        try:
+            et = event.type()
+            if et == QEvent.Type.ToolTip:
+                if obj is self._tip or not isinstance(obj, QWidget):
+                    return False
+                text = obj.toolTip()
+                if not text:
+                    return False
+                if isinstance(event, QHelpEvent):
+                    pos = event.globalPos() + QPoint(12, 14)
+                else:
+                    pos = QCursor.pos() + QPoint(12, 14)
+                self._anchor = obj
+                self._tip.popup(text, pos)
+                return True
+            if et == QEvent.Type.Leave and obj is self._anchor:
+                self._tip.hide()
+                self._anchor = None
+                return False
+            if et in (
+                QEvent.Type.Wheel,
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.WindowDeactivate,
+            ) and self._tip.isVisible():
+                self._tip.hide()
+                self._anchor = None
+        except Exception:
+            return False
+        return False
+
+
+_HINT_TIP: HintTip | None = None
+
+
+def hint_tip() -> HintTip:
+    global _HINT_TIP
+    app = QApplication.instance()
+    if _HINT_TIP is None and app is not None:
+        _HINT_TIP = HintTip()
+        filt = _TipFilter(_HINT_TIP, app)
+        app.installEventFilter(filt)
+        _HINT_TIP._filter = filt  # noqa: SLF001 — keep the filter alive
+    if _HINT_TIP is None:
+        raise RuntimeError("HintTip needs a QApplication")
+    return _HINT_TIP
+
+
+def install_hint_tips(app: QApplication | None = None) -> None:
+    app = app or QApplication.instance()
+    if app is not None:
+        hint_tip()
 
 
 class ElideLabel(QLabel):
@@ -548,6 +814,7 @@ class SearchField(QLineEdit):
         self.setFont(theme.font(12, 400))
         self.setFixedHeight(28)
         self.addAction(icons.icon("search", 13, theme.TEXT_MUTED), QLineEdit.ActionPosition.LeadingPosition)
+        self.setTextMargins(0, 0, 0, 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -893,8 +1160,12 @@ class Badge(QLabel):
 class KeyValueRow(QWidget):
     """Label on the left, value on the right, used in detail panels."""
 
+    clicked = Signal(str)
+
     def __init__(self, key: str, value: str = "", parent=None):
         super().__init__(parent)
+        self._filterable = False
+        self._dim = False
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
@@ -905,14 +1176,45 @@ class KeyValueRow(QWidget):
         self._v = ElideLabel(value)
         self._v.setFont(theme.font(11, 400))
         self._v.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px;")
+        self._k.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._v.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         lay.addWidget(self._k)
         lay.addWidget(self._v, 1)
 
     def set_value(self, value: str, dim: bool = False) -> None:
+        self._dim = dim
         self._v.setText(value or "--")
-        self._v.setStyleSheet(
-            f"color: {theme.TEXT_MUTED if dim else theme.TEXT_DIM}; font-size: 11px;"
-        )
+        self._sync_filter_style()
 
     def set_hover_tip(self, enabled: bool) -> None:
         self._v.set_hover_tip(enabled)
+        self._sync_filter_style()
+
+    def set_filterable(self, enabled: bool) -> None:
+        self._filterable = enabled
+        self._sync_filter_style()
+
+    def _has_filter_value(self) -> bool:
+        text = (self._v.fullText() or "").strip()
+        return text not in ("", "--")
+
+    def _sync_filter_style(self) -> None:
+        active = self._filterable and self._has_filter_value()
+        color = theme.ACCENT if active else (theme.TEXT_MUTED if self._dim else theme.TEXT_DIM)
+        self._v.setStyleSheet(f"color: {color}; font-size: 11px;")
+        if active:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            tip = self._v.fullText()
+            self.setToolTip(f"{tip}\n点击按此项筛选" if tip else "点击按此项筛选")
+        else:
+            self.unsetCursor()
+            if not self._v.toolTip():
+                self.setToolTip("")
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        if (self._filterable and event.button() == Qt.MouseButton.LeftButton
+                and self._has_filter_value()):
+            self.clicked.emit(self._k.text())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)

@@ -6,7 +6,7 @@ import sys
 
 APP_NAME = "NetworkRadio"
 APP_TITLE = "BROADCAST"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 APP_AUTHOR_QQ = "398511660"
 APP_REPO = "https://github.com/martjay/network-radio"
 

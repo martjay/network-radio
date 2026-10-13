@@ -13,16 +13,10 @@ from PySide6.QtWidgets import (
 
 from . import icons, paths, theme
 from .library import SORT_MODES
+from .taxonomy import GENRE_CHOICES
 from .recorder import RECORD_FORMATS, ffmpeg_available, ffmpeg_path
 from .widgets import ElideLabel, IconButton, KeyValueRow, TextButton, hline, vline
 
-GENRE_CHOICES = [
-    ("news", "新闻资讯"), ("classical", "古典音乐"), ("jazz", "爵士蓝调"),
-    ("electronic", "电子舞曲"), ("chill", "氛围休闲"), ("rock", "摇滚金属"),
-    ("pop", "流行金曲"), ("urban", "嘻哈节奏"), ("folk", "民谣乡村"),
-    ("world", "世界拉丁"), ("oldies", "怀旧年代"), ("screen", "影视原声"),
-    ("sport", "体育赛事"), ("culture", "文化谈话"), ("varied", "综合电台"),
-]
 
 
 class DialogBase(QDialog):
@@ -774,13 +768,12 @@ class PreferencesDialog(DialogBase):
         lay.addWidget(head)
 
         lay.addWidget(hline(theme.STROKE_SOFT))
-        for key, value in [
-            ("内置电台", f"{stats['builtin']} 个"),
-            ("自建电台", f"{stats['custom']} 个"),
-            ("收藏", f"{stats['favorites']} 个"),
-            ("覆盖国家", f"{stats['countries']} 个"),
-        ]:
-            lay.addWidget(KeyValueRow(key, value))
+        self._cat_builtin = KeyValueRow("内置电台", f"{stats['builtin']} 个")
+        lay.addWidget(self._cat_builtin)
+        lay.addWidget(KeyValueRow("自建电台", f"{stats['custom']} 个"))
+        lay.addWidget(KeyValueRow("收藏", f"{stats['favorites']} 个"))
+        self._cat_countries = KeyValueRow("覆盖国家", f"{stats['countries']} 个")
+        lay.addWidget(self._cat_countries)
         self._cat_date = KeyValueRow("电台库更新", stats.get("generated") or "--")
         lay.addWidget(self._cat_date)
 
@@ -788,20 +781,20 @@ class PreferencesDialog(DialogBase):
         sl = QHBoxLayout(sync_row)
         sl.setContentsMargins(0, 4, 0, 0)
         sl.setSpacing(8)
-        self._cat_status = QLabel("从 radio-browser 核对内置电台的流地址，有变更才改。")
+        self._cat_status = QLabel("对照社区数据库：改已换链的地址，并按相同分类规则收录新台。")
         self._cat_status.setFont(theme.font(11, 400))
         self._cat_status.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         self._cat_status.setWordWrap(True)
         sl.addWidget(self._cat_status, 1)
-        self._cat_btn = TextButton("更新地址", "refresh")
+        self._cat_btn = TextButton("同步电台库", "refresh")
         self._cat_btn.clicked.connect(self._sync_catalogue)
         sl.addWidget(self._cat_btn)
         lay.addWidget(sync_row)
         lay.addWidget(self._hint(
-            "内置电台库随安装包固定，不会自动改。点「更新地址」会按电台名和国家"
-            "对照社区数据库，把已经换链的流写进本机（收藏和最近播放会跟着改）。"
-            "真正改地址前会留下最近两次正常列表，可在下面恢复。自建电台请自行编辑。"
-            "需要联网，境外访问请先配好代理。"
+            "安装包里是经过解码验证的 820 个核心电台。点「同步电台库」会连社区数据库："
+            "已有电台按台名+国家改流地址；尚未收录且社区标记可播放的台按同一套分类规则追加，"
+            "本机不再设总上限，不会删掉现在的台，也不会改自建电台。"
+            "改动前留下最近两次列表，可在下面恢复。需要联网，境外访问请先配好代理。"
         ))
 
         self._backup_rows = []
@@ -846,8 +839,8 @@ class PreferencesDialog(DialogBase):
 
         lay.addWidget(hline(theme.STROKE_SOFT))
         note = QLabel(
-            "电台目录来自社区维护的公开电台数据库，每一条流都在收录时经过实际解码验证。"
-            "广播内容版权归各电台所有，本程序仅提供播放与录制工具。"
+            "电台目录来自社区维护的公开电台数据库。安装包内的核心电台经过实际解码验证；"
+            "同步进来的新台以社区近期可播放标记为准。广播内容版权归各电台所有，本程序仅提供播放与录制工具。"
         )
         note.setFont(theme.font(11, 400))
         note.setStyleSheet(f"color: {theme.TEXT_MUTED};")
@@ -890,13 +883,14 @@ class PreferencesDialog(DialogBase):
                 self.proxy = proxy
 
             def run(self):
-                from .catalog import collect_url_patches
+                from .catalog import collect_catalogue_sync
                 try:
-                    self.done.emit(collect_url_patches(self.stations, proxy=self.proxy))
+                    self.done.emit(collect_catalogue_sync(self.stations, proxy=self.proxy))
                 except Exception as exc:  # noqa: BLE001
                     self.done.emit({
-                        "ok": False, "updated": 0, "checked": 0,
-                        "unmatched": 0, "patches": [], "error": str(exc),
+                        "ok": False, "updated": 0, "added": 0, "checked": 0,
+                        "unmatched": 0, "patches": [], "additions": [],
+                        "error": str(exc),
                     })
 
         self._cat_thread = Worker(list(self.library.stations), self._current_proxy())
@@ -911,22 +905,36 @@ class PreferencesDialog(DialogBase):
             self._cat_status.setText(f"更新失败：{result.get('error') or '未知错误'}")
             return
         try:
-            n = self.library.apply_url_patches(result.get("patches") or [])
+            applied = self.library.apply_catalogue_sync(
+                result.get("patches") or [],
+                result.get("additions") or [],
+            )
         except OSError as exc:
             self._cat_status.setStyleSheet(f"color: {theme.REC};")
-            self._cat_status.setText(f"备份失败，地址未改动：{exc}")
+            self._cat_status.setText(f"备份失败，电台库未改动：{exc}")
             self._refresh_catalogue_backups()
             return
-        generated = self.library.stats().get("generated") or "--"
-        self._cat_date.set_value(generated)
+        stats = self.library.stats()
+        self._cat_date.set_value(stats.get("generated") or "--")
+        self._cat_builtin.set_value(f"{stats['builtin']} 个")
+        self._cat_countries.set_value(f"{stats['countries']} 个")
         self._refresh_catalogue_backups()
         self._cat_status.setStyleSheet(f"color: {theme.GOOD};")
-        if n:
+        n = int(applied.get("updated") or 0)
+        added = int(applied.get("added") or 0)
+        if n or added:
+            bits = []
+            if n:
+                bits.append(f"更新 {n} 个地址")
+            if added:
+                bits.append(f"新收录 {added} 个电台")
             self._cat_status.setText(
-                f"已更新 {n} 个电台地址，并留下本次改之前的列表备份。"
+                "，".join(bits) + f"。现在共 {stats['builtin']} 个，并留下改之前的备份。"
             )
         else:
-            self._cat_status.setText("对照完成，内置电台地址没有变化。")
+            self._cat_status.setText(
+                f"对照完成，没有改址也没有符合配额的新台。现在共 {stats['builtin']} 个。"
+            )
 
     def _refresh_catalogue_backups(self) -> None:
         found = {row["slot"]: row for row in self.library.list_catalogue_backups()}
@@ -938,7 +946,12 @@ class PreferencesDialog(DialogBase):
                 kv.set_value("还没有", dim=True)
                 btn.setEnabled(False)
                 continue
-            extra = f"{row['overrides']} 处改址" if row.get("overrides") else "安装包原表"
+            bits = []
+            if row.get("overrides"):
+                bits.append(f"{row['overrides']} 处改址")
+            if row.get("extra"):
+                bits.append(f"另收录 {row['extra']} 个")
+            extra = " · ".join(bits) if bits else "安装包原表"
             kv.set_value(f"{row['saved_at'] or '--'} · {extra}")
             btn.setEnabled(True)
 
@@ -955,7 +968,8 @@ class PreferencesDialog(DialogBase):
         if not confirm(
             self,
             "恢复电台列表",
-            f"把内置电台地址恢复为{label}备份（{when}）？收藏和最近播放会按台名对齐到旧地址。",
+            f"把电台库恢复为{label}备份（{when}）？已同步进来的新台和改过的地址都会回到那一版，"
+            f"收藏和最近播放会按台名对齐。",
         ):
             return
         result = self.library.restore_catalogue_backup(slot)
@@ -963,11 +977,16 @@ class PreferencesDialog(DialogBase):
             self._cat_status.setStyleSheet(f"color: {theme.REC};")
             self._cat_status.setText(f"恢复失败：{result.get('error') or '未知错误'}")
             return
-        generated = self.library.stats().get("generated") or "--"
-        self._cat_date.set_value(generated)
+        stats = self.library.stats()
+        self._cat_date.set_value(stats.get("generated") or "--")
+        self._cat_builtin.set_value(f"{stats['builtin']} 个")
+        self._cat_countries.set_value(f"{stats['countries']} 个")
         self._refresh_catalogue_backups()
         self._cat_status.setStyleSheet(f"color: {theme.GOOD};")
-        self._cat_status.setText(f"已恢复 {result.get('saved_at') or when} 的电台列表。")
+        self._cat_status.setText(
+            f"已恢复 {result.get('saved_at') or when} 的电台列表"
+            f"（{stats['builtin']} 个）。"
+        )
 
     def _copy_qq(self, qq: str) -> None:
         from PySide6.QtWidgets import QApplication

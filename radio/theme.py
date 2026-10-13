@@ -132,9 +132,20 @@ QWidget#Root[chrome="flush"] {{
 QToolTip {{
     background: {BG_PANEL_ALT};
     color: {TEXT};
-    border: 1px solid {ACCENT_DIM};
-    padding: 6px 10px;
-    font-size: 12px;
+    border: 1px solid {STROKE_STRONG};
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 11px;
+    min-width: 0px;
+    min-height: 0px;
+}}
+QLabel#HintTip {{
+    background: {BG_PANEL_ALT};
+    color: {TEXT};
+    border: 1px solid {STROKE_STRONG};
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 11px;
 }}
 
 /* ---------------------------------------------------------------- titlebar */
@@ -251,13 +262,21 @@ QLineEdit#Search {{
     background: {BG_INPUT};
     border: 1px solid {STROKE};
     border-radius: {RADIUS}px;
-    padding: 0px 8px 0px 26px;
+    padding: 0px 6px 0px 2px;
     color: {TEXT};
     font-size: 12px;
     selection-background-color: {ACCENT_DIM};
 }}
 QLineEdit#Search:focus {{
     border: 1px solid {ACCENT_DIM};
+}}
+QLineEdit#Search QToolButton {{
+    background: transparent;
+    border: none;
+    padding: 0px;
+    margin: 0px 2px;
+    width: 16px;
+    height: 16px;
 }}
 QLabel#CountLabel {{
     color: {TEXT_MUTED};
@@ -292,6 +311,20 @@ QLabel#PagerReadout {{
     font-size: 11px;
     font-weight: 600;
     font-family: "{mf}";
+}}
+QLineEdit#PagerJump {{
+    color: {TEXT};
+    background: transparent;
+    border: none;
+    padding: 0px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: "{mf}";
+    selection-background-color: {ACCENT_DIM};
+    selection-color: {TEXT};
+}}
+QLineEdit#PagerJump:focus {{
+    color: {ACCENT};
 }}
 QLabel#PagerRange {{
     color: {TEXT_MUTED};
@@ -342,7 +375,8 @@ QPushButton#Chip {{
     color: {TEXT_DIM};
     font-size: 11px;
     padding: 0px 10px;
-    height: 24px;
+    height: 26px;
+    min-width: 56px;
 }}
 QPushButton#Chip:hover {{
     border-color: {STROKE_STRONG};
@@ -356,6 +390,13 @@ QPushButton#Chip:checked {{
 }}
 
 /* ---------------------------------------------------------------- station table */
+QWidget#EmptyState {{
+    background: {BG_PANEL};
+}}
+QLabel#EmptyHint {{
+    color: {TEXT_MUTED};
+    font-size: 13px;
+}}
 QTreeView#StationTable {{
     background: {BG_PANEL};
     alternate-background-color: {BG_PANEL_ALT};
@@ -646,8 +687,43 @@ QComboBox#Field QAbstractItemView {{
     background: {BG_PANEL_ALT};
     border: 1px solid {STROKE_STRONG};
     color: {TEXT};
-    selection-background-color: {BG_ROW_SEL};
+    selection-background-color: {BG_ROW_HOVER};
+    selection-color: {WARN};
     outline: none;
+    max-height: 280px;
+}}
+QComboBox#Field QAbstractItemView::item:hover,
+QComboBox#Field QAbstractItemView::item:selected {{
+    color: {WARN};
+    background: {BG_ROW_HOVER};
+}}
+QListView#ComboPopup {{
+    background: {BG_PANEL_ALT};
+    outline: none;
+    max-height: 280px;
+    color: {TEXT};
+}}
+QListView#ComboPopup::item {{
+    color: {TEXT};
+    padding: 3px 8px;
+}}
+QListView#ComboPopup::item:hover,
+QListView#ComboPopup::item:selected {{
+    color: {WARN};
+    background: {BG_ROW_HOVER};
+}}
+QListView#ComboPopup QScrollBar:vertical {{
+    background: #161a1f;
+    width: 12px;
+    margin: 2px;
+}}
+QListView#ComboPopup QScrollBar::handle:vertical {{
+    background: #6a7580;
+    min-height: 32px;
+    border-radius: 4px;
+}}
+QListView#ComboPopup QScrollBar::handle:vertical:hover {{
+    background: #8b96a1;
 }}
 QCheckBox {{
     color: {TEXT_DIM};
