@@ -6,7 +6,7 @@ import sys
 
 APP_NAME = "NetworkRadio"
 APP_TITLE = "BROADCAST"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 APP_AUTHOR_QQ = "398511660"
 APP_REPO = "https://github.com/martjay/network-radio"
 
@@ -241,6 +241,7 @@ def is_frozen() -> bool:
 
 
 USERDATA = "userdata.json"
+GENRE_CACHE = "genre_cache.json"
 SETTINGS = "settings.json"
 CATALOGUE_BACKUP_1 = "catalogue-backup-1.json"
 CATALOGUE_BACKUP_2 = "catalogue-backup-2.json"

@@ -11,6 +11,9 @@ import unicodedata
 
 from .geo import COUNTRY_ZH, country_zh, language_zh  # noqa: F401
 
+# Bump when GENRES / classify rules change so the app rebuilds the genre cache.
+TAXONOMY_REV = 8
+
 # Snapshot baked into the installer. Live sync may grow past this, but the
 # shipped file stays a verified, balanced core.
 SHIP_MAX = 820
@@ -261,28 +264,46 @@ def _spec_hits(spec, hay: str) -> bool:
     return val.search(hay) is not None
 
 
-_GENRE_MATCHERS: list[tuple[str, list, list]] = []
+def _split_keywords(kws: list[str]) -> tuple[list[tuple[str, int]], re.Pattern | None]:
+    longs: list[tuple[str, int]] = []
+    shorts: list[str] = []
+    for kw in kws:
+        folded = fold_match_text(kw)
+        if not folded:
+            continue
+        if " " not in folded and len(folded) <= 4:
+            shorts.append(folded)
+        else:
+            longs.append((folded, len(folded)))
+    shorts.sort(key=len, reverse=True)
+    rx = None
+    if shorts:
+        rx = re.compile(
+            r"(?<![a-z])(?:" + "|".join(re.escape(s) for s in shorts)
+            + r")(?:fm|radio|only|mix|music|[0-9]+)?(?![a-z]{3,})"
+        )
+    return longs, rx
+
+
+_GENRE_PACKS: list[tuple[str, list[tuple[str, int]], re.Pattern | None, list[tuple[str, int]], re.Pattern | None]] = []
 for _key, _zh, _en, _kws in GENRES:
-    _GENRE_MATCHERS.append((
-        _key,
-        [s for s in (_compile_kw(k) for k in _kws) if s],
-        [s for s in (_compile_kw(k) for k in STRONG.get(_key, [])) if s],
-    ))
+    longs, short_rx = _split_keywords(_kws)
+    strong_longs, strong_rx = _split_keywords(STRONG.get(_key, []))
+    _GENRE_PACKS.append((_key, longs, short_rx, strong_longs, strong_rx))
 
 
-# `superhits` / `synthpop` / `hardrock` where the genre sits at the end of a compound.
-_COMPOUND_TAILS: list[tuple[str, re.Pattern]] = [
-    (key, re.compile(r"[a-z]{3,8}" + stem + r"(?![a-z0-9])"))
-    for key, stem in (
-        ("pop", "hits"), ("pop", "hit"), ("pop", "pop"),
-        ("rock", "rock"), ("jazz", "jazz"), ("news", "news"),
-        ("electronic", "dance"), ("electronic", "house"),
-        ("metal", "metal"), ("blues", "blues"), ("folk", "folk"),
-        ("rock", "punk"), ("urban", "soul"), ("urban", "funk"),
-        ("urban", "rap"), ("talk", "talk"), ("chill", "chill"),
-        ("oldies", "gold"), ("sport", "sport"),
-    )
-]
+_COMPOUND_STEMS = {
+    "hits": "pop", "hit": "pop", "pop": "pop",
+    "rock": "rock", "punk": "rock",
+    "jazz": "jazz", "news": "news",
+    "dance": "electronic", "house": "electronic",
+    "metal": "metal", "blues": "blues", "folk": "folk",
+    "soul": "urban", "funk": "urban", "rap": "urban",
+    "talk": "talk", "chill": "chill", "gold": "oldies", "sport": "sport",
+}
+_COMPOUND_RX = re.compile(
+    r"[a-z]{3,8}(" + "|".join(_COMPOUND_STEMS) + r")(?![a-z0-9])"
+)
 
 
 # Untagged local FMs: country is a better signal than stuffing them into 流行.
@@ -349,18 +370,25 @@ def classify(rec: dict) -> str:
     ]))
     scores: dict[str, float] = {}
     if hay:
-        for key, specs, strong_specs in _GENRE_MATCHERS:
+        for key, longs, short_rx, strong_longs, strong_rx in _GENRE_PACKS:
             sc = 0.0
-            for spec in specs:
-                if _spec_hits(spec, hay):
-                    sc += 1.0 + min(spec[2], 14) / 14.0
-            for spec in strong_specs:
-                if _spec_hits(spec, hay):
+            for kw, nlen in longs:
+                if kw in hay:
+                    sc += 1.0 + min(nlen, 14) / 14.0
+            if short_rx is not None and short_rx.search(hay):
+                sc += 1.6
+            for kw, _nlen in strong_longs:
+                if kw in hay:
                     sc += 3.0
+            if strong_rx is not None and strong_rx.search(hay):
+                sc += 3.0
             if sc:
                 scores[key] = sc
-        for key, rx in _COMPOUND_TAILS:
-            if rx.search(hay):
+        seen_tails: set[str] = set()
+        for m in _COMPOUND_RX.finditer(hay):
+            key = _COMPOUND_STEMS.get(m.group(1))
+            if key and key not in seen_tails:
+                seen_tails.add(key)
                 scores[key] = scores.get(key, 0.0) + 1.5
         if _OLDIES_DECADE.search(hay):
             scores["oldies"] = scores.get("oldies", 0.0) + 2.2

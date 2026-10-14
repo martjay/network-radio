@@ -19,8 +19,8 @@ import urllib.request
 
 OWNER = "martjay"
 REPO = "network-radio"
-TAG = "v1.0.7"
-ASSET = os.path.join("dist", "Broadcast-1.0.7-win64.zip")
+TAG = "v1.0.8"
+ASSET = os.path.join("dist", "Broadcast-1.0.8-win64.zip")
 API = "https://api.github.com"
 UA = "BroadcastPublisher/1.0"
 
@@ -94,15 +94,14 @@ def ensure_release(tok: str) -> int:
         return data["id"]
 
     body = (
-        "## BROADCAST 1.0.7 — 网络收音机\n\n"
+        "## BROADCAST 1.0.8 — 网络收音机\n\n"
         "Windows 免安装版。解压后运行 `Broadcast.exe`，**无需安装 Python**。\n\n"
         "### 下载\n"
-        "`Broadcast-1.0.7-win64.zip`\n\n"
+        "`Broadcast-1.0.8-win64.zip`\n\n"
         "### 这一版\n"
-        "- 分类更准：按台名/标签打分，无标签时按国家兜底（拉美→拉丁，中东/南亚/北非等→世界），综合台数量下降\n"
-        "- 搜索可用中文类型名（流行、怀旧、综合等）；单击台名复制，`Ctrl+L` 定位正在播放\n"
-        "- 关闭按钮悬停为白叉，页码框只接受数字\n"
-        "- 电台库同步不设总上限；21 类，一台只进一类\n\n"
+        "- 托盘右键菜单去掉正在播放歌名，菜单更窄，左侧留白\n"
+        "- 启动更快：类型分类结果写入缓存，冷启动不再每次重算全库\n"
+        "- 分类匹配改为批量正则，评分更快\n\n"
         "### 特性\n"
         "- **820 个验证过的核心电台 / 74 个国家 / 21 个类型**，同步后可继续增长\n"
         "- 96 个中文电台：RTHK 1–8、臺北電台、警察廣播電台、河南戏曲广播等\n"
@@ -123,7 +122,7 @@ def ensure_release(tok: str) -> int:
     status, data = api("POST", f"/repos/{OWNER}/{REPO}/releases", tok, {
         "tag_name": TAG,
         "target_commitish": "main",
-        "name": "BROADCAST 1.0.7 — 网络收音机",
+        "name": "BROADCAST 1.0.8 — 网络收音机",
         "body": body,
         "draft": False,
         "prerelease": False,

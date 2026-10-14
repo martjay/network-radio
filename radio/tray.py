@@ -34,14 +34,26 @@ class TrayController(QObject):
         self.icon.setToolTip(title)
 
         self.menu = QMenu()
-        self.menu.setStyleSheet(theme.stylesheet())
-
-        # Disabled header row mirroring what is playing, so the menu answers
-        # "what is on right now" without restoring the window.
-        self._act_status = QAction("未在播放", self)
-        self._act_status.setEnabled(False)
-        self.menu.addAction(self._act_status)
-        self.menu.addSeparator()
+        self.menu.setObjectName("TrayMenu")
+        # Own padding: extra left inset, compact right so the menu stays narrow
+        # (the old now-playing header forced it wide).
+        self.menu.setStyleSheet(
+            theme.stylesheet()
+            + """
+QMenu#TrayMenu {
+    padding: 6px 4px;
+}
+QMenu#TrayMenu::item {
+    padding: 6px 14px 6px 18px;
+}
+QMenu#TrayMenu::icon {
+    left: 10px;
+}
+QMenu#TrayMenu::separator {
+    margin: 4px 12px;
+}
+"""
+        )
 
         self._act_show = self._action("显示主窗口", self.show_requested, icon="external")
         self.menu.addAction(self._act_show)
@@ -111,12 +123,6 @@ class TrayController(QObject):
         if track:
             lines.append(track)
         self.icon.setToolTip("\n".join(lines))
-        # The menu header mirrors the tooltip's most useful line.
-        header = station or "未在播放"
-        if track:
-            header = f"{station} — {track}" if station else track
-        # Tray menus render one line; keep the header short enough to read.
-        self._act_status.setText(header if len(header) <= 42 else header[:41] + "…")
 
     def set_state(self, playing: bool, recording: bool, is_favorite: bool) -> None:
         # The mark itself tells idle from live at a glance in the tray.

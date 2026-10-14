@@ -98,18 +98,21 @@ policy = QApplication.highDpiScaleFactorRoundingPolicy()
 check("rounding policy is PassThrough",
       policy == Qt.HighDpiScaleFactorRoundingPolicy.PassThrough, str(policy))
 
-print("\n=== 8. tray status header + icon state ===")
+print("\n=== 8. tray tooltip + icon state ===")
 win3 = MainWindow()
 win3.show()
 app.processEvents()
 if win3.tray and win3.tray.available:
     win3.tray.set_playing("Test FM", "Artist - Title", playing=True)
-    check("menu header shows station", "Test FM" in win3.tray._act_status.text(),
-          win3.tray._act_status.text())
+    tip = win3.tray.icon.toolTip()
+    check("tooltip shows station", "Test FM" in tip, tip)
+    texts = [a.text() for a in win3.tray.menu.actions() if a.text()]
+    check("menu has no now-playing header",
+          not any("Test FM" in t or "Artist - Title" in t for t in texts),
+          str(texts[:3]))
     win3.tray.set_state(True, False, False)
     check("tray icon switches when playing", not win3.tray.icon.icon().isNull())
     win3.tray.set_playing("", "", playing=False)
-    check("menu header resets when idle", win3.tray._act_status.text() == "未在播放")
 else:
     check("tray available", False, "no system tray on this desktop")
 

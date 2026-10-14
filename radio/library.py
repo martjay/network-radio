@@ -148,19 +148,56 @@ class Library(QObject):
         self.meta["countries"] = countries_meta(self.stations)
 
     def _reclassify_stations(self) -> None:
-        """Apply the current taxonomy to bundled and synced stations."""
-        from .taxonomy import classify
+        """Apply the current taxonomy to bundled and synced stations.
+
+        Results are cached under genre_cache.json keyed by TAXONOMY_REV so a
+        later launch does not rescore thirty thousand stations.
+        """
+        from .taxonomy import TAXONOMY_REV, classify
+
+        cache_path = paths.user_file(paths.GENRE_CACHE)
+        by_url: dict[str, str] = {}
+        cached_rev = None
+        try:
+            with open(cache_path, encoding="utf-8") as fh:
+                blob = json.load(fh)
+            if isinstance(blob, dict) and blob.get("rev") == TAXONOMY_REV:
+                cached = blob.get("genres") or {}
+                if isinstance(cached, dict):
+                    by_url = cached
+                    cached_rev = TAXONOMY_REV
+        except (OSError, json.JSONDecodeError, TypeError):
+            by_url = {}
+
+        dirty = cached_rev != TAXONOMY_REV
+        if dirty:
+            by_url = {}
 
         for s in self.stations:
             if s.get("custom"):
                 continue
-            s["genre"] = classify({
-                "name": s.get("name") or "",
-                "tags": s.get("tags") or "",
-                "language": s.get("language") or "",
-                "cc": s.get("cc") or "",
-                "countrycode": s.get("cc") or s.get("countrycode") or "",
-            })
+            uk = s.get("url") or ""
+            genre = by_url.get(uk) if uk else None
+            if not genre:
+                genre = classify({
+                    "name": s.get("name") or "",
+                    "tags": s.get("tags") or "",
+                    "language": s.get("language") or "",
+                    "cc": s.get("cc") or "",
+                    "countrycode": s.get("cc") or s.get("countrycode") or "",
+                })
+                if uk:
+                    by_url[uk] = genre
+                dirty = True
+            s["genre"] = genre
+        if dirty:
+            try:
+                _atomic_write(cache_path, json.dumps(
+                    {"rev": TAXONOMY_REV, "genres": by_url},
+                    ensure_ascii=False, separators=(",", ":"),
+                ))
+            except OSError:
+                pass
         self._refresh_meta()
 
     @staticmethod
