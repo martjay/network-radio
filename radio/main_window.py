@@ -6,7 +6,7 @@ import sys
 import time
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QPainter
+from PySide6.QtGui import QAction, QGuiApplication, QIntValidator, QKeySequence, QPainter
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMenu, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
@@ -25,7 +25,7 @@ from .widgets import (
     Chip, ElideLabel, IconButton, KeyValueRow, LevelMeter, NavItem,
     PlayingIndicator, ScrollComboBox, ScrollingLabel, SearchField,
     SpectrumWidget, StatRow, TextButton, TransportButton, VolumeControl,
-    hline, section_label, vline,
+    hline, section_label, show_copy_tip, vline,
 )
 
 
@@ -432,6 +432,7 @@ class MainWindow(QWidget):
         self._page_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._page_edit.setFixedWidth(40)
         self._page_edit.setMaxLength(5)
+        self._page_edit.setValidator(QIntValidator(1, 99999, self._page_edit))
         self._page_edit.setToolTip("输入页码，回车直达")
         self._page_edit.returnPressed.connect(self._jump_typed_page)
         self._page_edit.editingFinished.connect(self._jump_typed_page)
@@ -556,11 +557,16 @@ class MainWindow(QWidget):
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(7)
         self._mini_indicator = PlayingIndicator(self, 3)
+        self._mini_indicator.clicked.connect(self._locate_playing)
         title_row.addWidget(self._mini_indicator)
         self._mini_title = ElideLabel("未选择电台")
         self._mini_title.setFont(theme.font(14, 700))
         self._mini_title.setStyleSheet(f"color: {theme.TEXT};")
         title_row.addWidget(self._mini_title, 1)
+        self._locate_btn = IconButton("locate", 26, 13, "定位到正在播放的电台  (Ctrl+L)")
+        self._locate_btn.clicked.connect(self._locate_playing)
+        self._locate_btn.setEnabled(False)
+        title_row.addWidget(self._locate_btn)
         info_col.addLayout(title_row)
 
         self._mini_meta = ElideLabel("从左侧列表中选择一个电台开始收听")
@@ -851,6 +857,7 @@ class MainWindow(QWidget):
         QShortcut(QKeySequence("Ctrl+Comma"), self, self._open_preferences)
         QShortcut(QKeySequence("Ctrl+N"), self, self._add_station)
         QShortcut(QKeySequence("Ctrl+D"), self, self._toggle_favorite_current)
+        QShortcut(QKeySequence("Ctrl+L"), self, self._locate_playing)
         QShortcut(QKeySequence("Escape"), self, self._on_escape)
         QShortcut(QKeySequence("F11"), self, self._toggle_max)
 
@@ -1296,6 +1303,7 @@ class MainWindow(QWidget):
         genre = GENRE_ZH.get(station.get("genre", ""), station.get("genre", ""))
         lang = language_zh(station.get("language", "") or "") or (station.get("language") or "--")
         self._np_title.setText(name)
+        self._bind_station_name_copy(name)
         self._np_sub.setText(" · ".join([b for b in [country, genre] if b]))
         self._info_rows["国家"].set_value(country)
         self._info_rows["地区"].set_value(station.get("state", "") or "--")
@@ -1321,6 +1329,61 @@ class MainWindow(QWidget):
         self._act_fav.setIcon(icons.icon("heart_filled" if fav else "heart", 14,
                                          theme.REC if fav else theme.TEXT_DIM))
         self._act_home.setEnabled(bool(station.get("homepage")))
+        self._sync_locate_enabled()
+
+    def _bind_station_name_copy(self, name: str) -> None:
+        real = bool((name or "").strip()) and name != "未选择电台"
+        self._np_title.set_copy_on_click(real)
+        self._mini_title.set_copy_on_click(real)
+
+    def _sync_locate_enabled(self) -> None:
+        on = bool(self.engine.station and (self.engine.station.get("url") or ""))
+        self._locate_btn.setEnabled(on)
+
+    def _copy_station_name(self, name: str, widget=None) -> None:
+        text = (name or "").strip()
+        if not text or text == "未选择电台":
+            return
+        QApplication.clipboard().setText(text)
+        if widget is not None:
+            show_copy_tip(widget)
+        self._status_text.setText("已复制电台名")
+
+    def _locate_playing(self) -> None:
+        """Jump the station list to the tuned station, clearing filters if needed."""
+        station = self.engine.station
+        if not station or not station.get("url"):
+            self._status_text.setText("当前没有正在播放的电台")
+            return
+        if not self.isVisible():
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        url = station.get("url")
+        if not any(r.get("url") == url for r in self._filtered_rows):
+            self._clear_list_filters()
+        self.select_station(url)
+        if any(r.get("url") == url for r in self._filtered_rows):
+            self._status_text.setText("已定位到正在播放的电台")
+        else:
+            self._status_text.setText("列表里找不到这个电台")
+
+    def _clear_list_filters(self) -> None:
+        """Drop search / country / chips / genre so a hidden station can surface."""
+        self.search.blockSignals(True)
+        self.search.setText("")
+        self.search.blockSignals(False)
+        self._set_country_filter("all")
+        for chip in (self._quality_chip, self._fav_chip, self._zh_chip):
+            chip.blockSignals(True)
+            chip.setChecked(False)
+            chip.blockSignals(False)
+        self.library.set("favorites_only", False, save=False)
+        self.library.set("zh_only", False, save=False)
+        self._section = "all"
+        self._set_nav("all")
+        self.library.set("genre", "all", save=False)
+        self._apply_filters()
 
     def _current_station(self) -> dict | None:
         idx = self.table.currentIndex()
@@ -1420,6 +1483,7 @@ class MainWindow(QWidget):
                 self._np_track.setText("")
             else:
                 self._mini_title.setText("未选择电台")
+                self._bind_station_name_copy("")
                 self._mini_meta.setText("从左侧列表中选择一个电台开始收听")
                 self._mini_track.setText("")
                 self._np_track.setText("")
@@ -1434,6 +1498,7 @@ class MainWindow(QWidget):
                 self.engine.station.get("url", "") if state in ("playing", "buffering") else "",
                 self.engine.station.get("url", "") if state == "connecting" else "",
             )
+        self._sync_locate_enabled()
 
         if state == "playing":
             url = self.engine.station.get("url", "") if self.engine.station else ""
@@ -1449,6 +1514,7 @@ class MainWindow(QWidget):
         self._show_station_detail(station)
         self.library.set("last_station", station.get("url", ""), save=False)
         self._mini_title.setText(station.get("name", ""))
+        self._bind_station_name_copy(station.get("name", ""))
         bits = []
         if station.get("country"):
             bits.append(station["country"])
@@ -1831,9 +1897,18 @@ class MainWindow(QWidget):
         act_fav.triggered.connect(lambda: self._on_favorite_toggled(url))
         menu.addAction(act_fav)
 
+        act_copy_name = QAction("复制电台名", self)
+        act_copy_name.triggered.connect(
+            lambda: self._copy_station_name(station.get("name", ""), self.table)
+        )
+        menu.addAction(act_copy_name)
         act_copy = QAction("复制流地址", self)
         act_copy.triggered.connect(lambda: QApplication.clipboard().setText(url))
         menu.addAction(act_copy)
+        if self.engine.station and self.engine.station.get("url"):
+            act_locate = QAction("定位正在播放的电台", self)
+            act_locate.triggered.connect(self._locate_playing)
+            menu.addAction(act_locate)
 
         if station.get("homepage"):
             act_home = QAction("打开官网", self)

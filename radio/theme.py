@@ -175,9 +175,12 @@ QPushButton#WinBtn:hover {{
     background: {BG_ROW_HOVER};
     color: {TEXT};
 }}
+QPushButton#WinBtnClose {{
+    background: transparent;
+    border: none;
+}}
 QPushButton#WinBtnClose:hover {{
-    background: #c0392b;
-    color: #ffffff;
+    background: #e81123;
 }}
 
 /* ---------------------------------------------------------------- sidebar */

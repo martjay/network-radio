@@ -15,7 +15,7 @@ from . import icons, paths, theme
 from .library import SORT_MODES
 from .taxonomy import GENRE_CHOICES
 from .recorder import RECORD_FORMATS, ffmpeg_available, ffmpeg_path
-from .widgets import ElideLabel, IconButton, KeyValueRow, TextButton, hline, vline
+from .widgets import ElideLabel, IconButton, KeyValueRow, TextButton, _WinCloseButton, hline, vline
 
 
 
@@ -51,11 +51,7 @@ class DialogBase(QDialog):
         self._title.setStyleSheet(f"color: {theme.TEXT};")
         bar_lay.addWidget(self._title)
         bar_lay.addStretch(1)
-        close = QPushButton()
-        close.setObjectName("WinBtn")
-        close.setFixedSize(36, 34)
-        close.setIcon(icons.icon("close", 12, theme.TEXT_DIM))
-        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close = _WinCloseButton(width=36, height=34, icon_size=13)
         close.clicked.connect(self.reject)
         bar_lay.addWidget(close)
         root.addWidget(bar)

@@ -152,9 +152,14 @@ class Library(QObject):
         from .taxonomy import classify
 
         for s in self.stations:
+            if s.get("custom"):
+                continue
             s["genre"] = classify({
                 "name": s.get("name") or "",
                 "tags": s.get("tags") or "",
+                "language": s.get("language") or "",
+                "cc": s.get("cc") or "",
+                "countrycode": s.get("cc") or s.get("countrycode") or "",
             })
         self._refresh_meta()
 
@@ -524,10 +529,14 @@ class Library(QObject):
         if text:
             terms = [t for t in text.lower().split() if t]
             if terms:
+                from .taxonomy import GENRE_EN, GENRE_ZH
+
                 def match(s: dict) -> bool:
+                    gkey = s.get("genre") or ""
                     hay = " ".join([
                         s.get("name", ""), s.get("country", ""), s.get("tags", ""),
-                        s.get("language", ""), s.get("state", ""), s.get("genre", ""),
+                        s.get("language", ""), s.get("state", ""),
+                        gkey, GENRE_ZH.get(gkey, ""), GENRE_EN.get(gkey, ""),
                     ]).lower().replace("、", " ")
                     return all(t in hay for t in terms)
                 rows = [s for s in rows if match(s)]

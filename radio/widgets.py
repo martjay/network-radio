@@ -371,7 +371,7 @@ class ElideLabel(QLabel):
 
     def mouseReleaseEvent(self, event):  # noqa: N802
         if (self._copy_on_click and event.button() == Qt.MouseButton.LeftButton
-                and self._full.strip()):
+                and self._full.strip() and self._full not in ("未选择电台", "--")):
             QApplication.clipboard().setText(self._full)
             self.copied.emit(self._full)
             show_copy_tip(self)
@@ -823,16 +823,27 @@ class SearchField(QLineEdit):
 class PlayingIndicator(QWidget):
     """Three-bar equaliser animation shown next to the station being played."""
 
+    clicked = Signal()
+
     def __init__(self, parent=None, bars: int = 3, color: str = theme.ACCENT):
         super().__init__(parent)
         self._bars = bars
         self._color = color
         self._phase = 0.0
         self._active = False
-        self.setFixedSize(bars * 4 + 2, 14)
+        self.setFixedSize(max(18, bars * 4 + 2), 16)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("定位到正在播放的电台  (Ctrl+L)")
         self._timer = QTimer(self)
         self._timer.setInterval(90)
         self._timer.timeout.connect(self._tick)
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def set_active(self, active: bool) -> None:
         self._active = active
@@ -896,6 +907,29 @@ class StatRow(QWidget):
 # --------------------------------------------------------------------------- #
 #  custom title bar
 # --------------------------------------------------------------------------- #
+class _WinCloseButton(QPushButton):
+    """Close control: pixmap icons ignore QSS `color`, so hover swaps to white."""
+
+    def __init__(self, parent=None, width: int = 44, height: int | None = None, icon_size: int = 15):
+        super().__init__(parent)
+        self.setObjectName("WinBtnClose")
+        self.setFixedSize(width, theme.TITLEBAR_H - 1 if height is None else height)
+        self.setIconSize(QSize(icon_size, icon_size))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("关闭")
+        self._idle = icons.icon("close", icon_size, theme.TEXT)
+        self._hot = icons.icon("close", icon_size, "#ffffff")
+        self.setIcon(self._idle)
+
+    def enterEvent(self, event):  # noqa: N802
+        self.setIcon(self._hot)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802
+        self.setIcon(self._idle)
+        super().leaveEvent(event)
+
+
 class TitleBar(QWidget):
     """Frameless window chrome: brand mark and window buttons. Empty middle is for dragging."""
 
@@ -930,7 +964,8 @@ class TitleBar(QWidget):
 
         self._btn_min = self._win_button("minimize", "最小化", self.minimize_clicked)
         self._btn_max = self._win_button("maximize", "最大化", self.maximize_clicked)
-        self._btn_close = self._win_button("close", "关闭", self.close_clicked, close=True)
+        self._btn_close = _WinCloseButton()
+        self._btn_close.clicked.connect(self.close_clicked.emit)
         for b in (self._btn_min, self._btn_max, self._btn_close):
             lay.addWidget(b)
 

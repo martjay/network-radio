@@ -165,6 +165,29 @@ if empty_pair:
           (not win._empty_state.isVisible()) == (len(win._filtered_rows) > 0),
           f"empty={win._empty_state.isVisible()} rows={len(win._filtered_rows)}")
 
+print("\n=== 9. locate playing station ===")
+win._clear_list_filters()
+app.processEvents()
+target = win._filtered_rows[80]
+win.engine.station = dict(target)
+win._sync_locate_enabled()
+check("locate enabled when tuned", win._locate_btn.isEnabled())
+win.search.setText("zzz-no-such-station-xyz-locate")
+app.processEvents()
+check("search hides the tuned station",
+      not any(r.get("url") == target.get("url") for r in win._filtered_rows))
+win._locate_playing()
+app.processEvents()
+check("locate clears search", win.search.text() == "")
+check("tuned station is in the list again",
+      any(r.get("url") == target.get("url") for r in win._filtered_rows))
+sel = win.model.station_at(win.table.currentIndex().row())
+check("located row selected",
+      bool(sel) and sel.get("url") == target.get("url"))
+win.engine.station = {}
+win._sync_locate_enabled()
+check("locate disabled when idle", not win._locate_btn.isEnabled())
+
 print()
 passed = sum(1 for _, ok in results if ok)
 failed = [n for n, ok in results if not ok]

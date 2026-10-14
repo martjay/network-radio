@@ -47,16 +47,21 @@ GENRES: list[tuple[str, str, str, list[str]]] = [
         "news", "information", "aktuell", "nachrichten", "noticias",
         "notizie", "nouvelles", "nyheter", "actualidad", "radio nacional", "public radio",
         "world service", "bbc world", "deutschlandfunk", "npr", "radio 1 news", "local news",
+        "france info", "france inter", "radio farda", "rfi",
+        "radio france internationale", "deutsche welle", "al jazeera",
+        "voice of america", "sky news", "fox news", "cnn", "msnbc",
+        "iran international", "radio nationale", "france bleu",
         "新闻", "资讯", "财经", "经济", "交通", "之声", "时报", "评论",
     ]),
     ("talk", "谈话访谈", "TALK", [
         "talk", "talkradio", "talk radio", "news talk", "spoken", "interview",
-        "radio hablada", "call in", "call-in", "谈话", "访谈", "夜话",
+        "radio hablada", "call in", "call-in", "spoken word", "谈话", "访谈", "夜话",
     ]),
     ("classical", "古典音乐", "CLASSICAL", [
         "classical", "classic fm", "klassik", "clasica", "classique", "opera", "symphony",
         "philharmonic", "orchestra", "chamber", "baroque", "concerto", "wclv", "venice classic",
         "radio classica", "beethoven", "mozart", "bach",
+        "filharmonia", "filharmonie", "philharmonie", "klassiek",
         "古典", "交响", "音乐厅", "歌剧", "爱乐",
     ]),
     ("jazz", "爵士", "JAZZ", [
@@ -72,18 +77,22 @@ GENRES: list[tuple[str, str, str, list[str]]] = [
         "electronic", "house", "techno", "trance", "edm", "dance", "electro", "drum and bass",
         "dnb", "dubstep", "hardstyle", "rave", "club", "nightclub", "psytrance", "hardcore",
         "minimal", "deep house", "ibiza", "gabber", "happy hardcore",
+        "eurodance", "italo dance", "dancefloor", "tech house",
+        "drum n bass", "drum bass",
         "电子", "电音", "舞曲", "慢摇", "迪厅",
     ]),
     ("chill", "氛围休闲", "AMBIENT & CHILL", [
         "ambient", "lounge", "chillout", "chill out", "chill", "downtempo", "easy listening",
         "relax", "sleep", "meditation", "zen", "spa", "calm", "new age", "drone", "space music",
-        "lofi", "lo-fi",
+        "lofi", "lo-fi", "instrumental", "buddha",
         "轻音乐", "休闲", "氛围", "放松", "助眠", "治愈",
     ]),
     ("rock", "摇滚", "ROCK", [
         "rock", "punk", "alternative", "grunge", "hardcore rock", "classic rock",
         "indie rock", "emo", "post rock", "prog", "pop rock", "soft rock", "hard rock",
-        "摇滚", "朋克",
+        "hardrock", "rock n roll", "rock and roll", "rockabilly",
+        "rockantenne", "indie",
+        "摇滚", "朋克", "roks",
     ]),
     ("metal", "金属", "METAL", [
         "metal", "heavy metal", "death metal", "black metal", "thrash", "doom",
@@ -91,13 +100,21 @@ GENRES: list[tuple[str, str, str, list[str]]] = [
         "金属",
     ]),
     ("pop", "流行金曲", "POP & HITS", [
-        "pop", "hits", "top 40", "top40", "chart", "hit radio", "hitradio", "contemporary",
-        "mainstream", "hot mix", "power hit", "music fm", "hit fm", "kiss fm", "energy",
+        "pop", "hits", "hit", "top 40", "top40", "top 50", "hot 100", "chart",
+        "hit radio", "hitradio", "contemporary", "mainstream", "hot mix", "power hit",
+        "music fm", "hit fm", "kiss fm", "energy", "nrj", "cherie", "exitos",
+        "love songs", "adult contemporary", "hitmix", "rfm", "европа плюс", "europa plus",
+        "cadena 100", "cadena dial", "los 40", "los40", "virgin radio",
+        "fun radio", "radio 538", "q-music", "qmusic", "greatest hits",
+        "bbc radio 1", "bbc radio 2", "авторадио", "русское радио",
+        "sky radio", "hitsonly", "top hits", "top 10", "top 20",
+        "hitz", "kiss radio", "kiss kiss", "love radio", "love fm",
+        "musica italiana",
         "流行", "金曲", "音乐台", "音乐广播", "音乐之声", "热歌", "榜单",
     ]),
     ("urban", "嘻哈节奏", "HIP-HOP & R&B", [
         "hip hop", "hiphop", "hip-hop", "rap", "rnb", "r&b", "urban", "soul", "funk", "groove",
-        "motown", "disco", "boogie", "trap",
+        "motown", "disco", "boogie", "trap", "raproyal",
         "嘻哈", "说唱", "节奏布鲁斯",
     ]),
     ("folk", "民谣", "FOLK", [
@@ -110,25 +127,39 @@ GENRES: list[tuple[str, str, str, list[str]]] = [
     ]),
     ("world", "世界音乐", "WORLD", [
         "world", "reggae", "afro", "african", "caribbean", "ska",
-        "bollywood", "hindi", "arabic", "turkish", "greek",
+        "bollywood", "bolly", "hindi", "arabic", "turkish", "greek",
         "asian", "k-pop", "kpop", "j-pop", "jpop", "anime",
+        "arabesk", "dangdut", "tarab", "punjabi", "bhangra", "tamil", "nepali",
+        "manele", "laika", "fado", "highlife", "afrobeat", "rai music",
+        "campursari", "keroncong", "gamelan", "soukous", "zouk",
+        "mandopop", "cantopop", "enka", "persian", "farsi", "kurdish",
+        "malayalam", "telugu", "kannada", "marathi", "bengali", "bangla",
+        "pinoy", "opm", "campur sari", "maghreb", "damar",
+        "africa", "narodni", "lautar", "only rai", "slovenian", "croatian",
+        "portuguese music", "ex-yu", "nepal", "turk fm", "indigenous",
         "民族", "戏曲", "粤剧", "京剧", "山歌", "世界音乐", "国乐", "古风",
     ]),
     ("latin", "拉丁美洲", "LATIN", [
         "latin", "salsa", "reggaeton", "flamenco", "tango", "cumbia",
-        "bachata", "kizomba", "merengue", "latino",
+        "bachata", "kizomba", "merengue", "latino", "vallenato", "ranchera", "mariachi",
         "regional mexican", "regional mexicana", "grupera", "norteño", "banda",
         "música mexicana", "musica mexicana", "música en español",
-        "latin pop", "latin jazz",
+        "latin pop", "latin jazz", "sertanejo", "forro", "pagode", "samba", "mpb",
+        "tropical", "romantica", "tejano", "norteno", "sierreno", "balada",
+        "mexican music",
     ]),
     ("oldies", "怀旧年代", "OLDIES & RETRO", [
-        "oldies", "80s", "90s", "70s", "60s", "retro", "vintage", "nostalgia", "classic hits",
-        "gold", "schlager", "evergreen", "memory", "oldie", "50s",
+        "oldies", "80s", "90s", "70s", "60s", "50s", "80er", "90er", "70er", "60er",
+        "eighties", "nineties", "seventies", "sixties", "flashback", "golden",
+        "retro", "vintage", "nostalgia", "classic hits", "gold", "schlager",
+        "evergreen", "memory", "oldie", "anos 80", "anos 90", "anos 70",
+        "golden hits", "gold radio", "classics", "christmas",
+        "nostalgie", "nostalgija", "nostalji", "chanson",
         "怀旧", "老歌", "经典老", "年代", "回忆",
     ]),
     ("screen", "影视原声", "SCREEN & SCORE", [
         "soundtrack", "score", "film", "cinema", "movie", "ost", "game music", "video game",
-        "anime music", "kino", "musical", "broadway",
+        "anime music", "kino", "musical", "broadway", "disney",
         "影视", "电影", "原声", "动漫",
     ]),
     ("sport", "体育赛事", "SPORT", [
@@ -139,18 +170,22 @@ GENRES: list[tuple[str, str, str, list[str]]] = [
     ("culture", "文化教育", "CULTURE", [
         "culture", "education", "audiobook", "book", "history", "science", "comedy",
         "story", "drama", "radio drama", "podcast", "art", "theatre", "theater",
-        "philosophy", "language", "educational",
+        "philosophy", "language", "educational", "humor", "humour", "kids", "children",
+        "audiobooks", "literatura", "cultural programming",
         "文化", "故事", "评书", "相声", "小说", "教育", "讲堂", "戏曲故事",
     ]),
     ("faith", "宗教福音", "FAITH", [
         "christian", "gospel", "worship", "catholic", "religious", "religion",
-        "bible", "cristiana", "church", "islamic", "quran", "hindu",
-        "福音", "基督教", "宗教",
+        "bible", "cristiana", "church", "islamic", "quran", "koran", "hindu",
+        "kristen", "rohani", "mantra", "praise", "islam", "muslim",
+        "buddhist", "orthodox", "iglesia", "evangelica", "adventist",
+        "religiao", "religião",
+        "福音", "基督教", "宗教", "古兰", "清真", "قرآن", "القرآن",
     ]),
 ]
 
 STRONG = {
-    "news": ["bbc world service", "deutschlandfunk", "npr news", "radio nacional"],
+    "news": ["bbc world service", "deutschlandfunk", "npr news", "radio nacional", "france info", "al jazeera"],
     "talk": ["news talk", "talk radio", "talkradio"],
     "classical": ["classic fm", "venice classic", "radio classica"],
     "jazz": ["jazz24", "venice jazz", "smooth jazz"],
@@ -158,9 +193,11 @@ STRONG = {
     "electronic": ["techno", "trance", "house music"],
     "rock": ["classic rock", "indie rock"],
     "metal": ["heavy metal", "death metal", "black metal"],
+    "pop": ["nrj", "hit fm", "top 40", "europa plus", "los 40", "cadena 100"],
+    "oldies": ["classic hits", "flashback", "80er", "90er", "nostalgie"],
     "country": ["classic country", "country music"],
-    "latin": ["regional mexican", "regional mexicana", "latin pop"],
-    "faith": ["christian radio", "gospel music"],
+    "latin": ["regional mexican", "regional mexicana", "latin pop", "sertanejo", "vallenato"],
+    "faith": ["christian radio", "gospel music", "quran"],
 }
 
 CHINESE_MARKERS = ("chinese", "mandarin", "cantonese", "中文", "华语", "国语", "粤语", "台灣", "台湾", "香港")
@@ -183,6 +220,117 @@ def norm_text(s: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def fold_match_text(s: str) -> str:
+    """Lowercase haystack for keyword matching: strip accents, unify separators."""
+    text = unicodedata.normalize("NFKD", s or "")
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = text.replace("\u2013", "-").replace("\u2014", "-")
+    text = text.lower().replace("_", " ").replace("/", " ").replace("&", " ")
+    text = text.replace("-", " ").replace(",", " ").replace(";", " ")
+    text = text.replace("#", " ").replace("+", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _compile_kw(kw: str):
+    kw = fold_match_text(kw)
+    if not kw:
+        return None
+    nlen = len(kw)
+    # Short tokens: allow `rockfm` / `hitsonly` / `jazz24`, but not `film` in `filharmonia`.
+    if " " not in kw and nlen <= 4:
+        glued = r"(?:fm|radio|only|mix|music|[0-9]+)?"
+        return (
+            "re",
+            re.compile(r"(?<![a-z])" + re.escape(kw) + glued + r"(?![a-z]{3,})"),
+            nlen,
+        )
+    return ("sub", kw, nlen)
+
+
+def keyword_in(kw: str, hay: str) -> bool:
+    spec = _compile_kw(kw)
+    if not spec or not hay:
+        return False
+    return _spec_hits(spec, hay)
+
+
+def _spec_hits(spec, hay: str) -> bool:
+    kind, val, _nlen = spec
+    if kind == "sub":
+        return val in hay
+    return val.search(hay) is not None
+
+
+_GENRE_MATCHERS: list[tuple[str, list, list]] = []
+for _key, _zh, _en, _kws in GENRES:
+    _GENRE_MATCHERS.append((
+        _key,
+        [s for s in (_compile_kw(k) for k in _kws) if s],
+        [s for s in (_compile_kw(k) for k in STRONG.get(_key, [])) if s],
+    ))
+
+
+# `superhits` / `synthpop` / `hardrock` where the genre sits at the end of a compound.
+_COMPOUND_TAILS: list[tuple[str, re.Pattern]] = [
+    (key, re.compile(r"[a-z]{3,8}" + stem + r"(?![a-z0-9])"))
+    for key, stem in (
+        ("pop", "hits"), ("pop", "hit"), ("pop", "pop"),
+        ("rock", "rock"), ("jazz", "jazz"), ("news", "news"),
+        ("electronic", "dance"), ("electronic", "house"),
+        ("metal", "metal"), ("blues", "blues"), ("folk", "folk"),
+        ("rock", "punk"), ("urban", "soul"), ("urban", "funk"),
+        ("urban", "rap"), ("talk", "talk"), ("chill", "chill"),
+        ("oldies", "gold"), ("sport", "sport"),
+    )
+]
+
+
+# Untagged local FMs: country is a better signal than stuffing them into 流行.
+_CC_LATIN = frozenset({
+    "MX", "GT", "HN", "SV", "NI", "CR", "PA", "CU", "DO", "PR", "HT",
+    "CO", "VE", "EC", "PE", "BO", "PY", "UY", "CL", "AR", "BR",
+})
+_CC_WORLD = frozenset({
+    "IN", "PK", "BD", "NP", "LK", "ID", "MY", "TH", "VN", "KH", "LA", "MM", "PH",
+    "TR", "IR", "IQ", "SA", "AE", "EG", "MA", "DZ", "TN", "LY", "YE", "JO", "LB",
+    "SY", "SD", "PS", "KW", "QA", "OM", "BH",
+    "NG", "KE", "GH", "ET", "TZ", "UG", "SN", "CI", "CM", "ZA",
+    "GR", "RS", "BA", "ME", "MK", "AL", "XK", "AM", "GE", "AZ", "UZ", "KZ",
+})
+_LANG_WORLD = (
+    "阿拉伯语", "印地语", "泰米尔语", "土耳其语", "波斯语", "希腊语", "尼泊尔语",
+    "泰语", "越南语", "印尼语", "马来语", "孟加拉语", "旁遮普语", "乌尔都语",
+    "arabic", "hindi", "tamil", "turkish", "persian", "farsi", "greek", "nepali",
+    "thai", "vietnamese", "indonesian", "malay", "bengali", "punjabi", "urdu",
+)
+_LANG_LATIN = (
+    "西班牙语", "葡萄牙语", "spanish", "espanol", "portuguese", "brazilian",
+)
+
+
+def _fallback_genre(rec: dict) -> str:
+    cc = (rec.get("countrycode") or rec.get("cc") or "").upper()
+    if cc in _CC_LATIN:
+        return "latin"
+    if cc in _CC_WORLD:
+        return "world"
+    lang = fold_match_text(rec.get("language") or "")
+    if cc in ("ES", "PT"):
+        return "varied"
+    if any(token in lang for token in _LANG_LATIN):
+        return "latin"
+    if any(token in lang for token in _LANG_WORLD):
+        return "world"
+    return "varied"
+
+
+_OLDIES_DECADE = re.compile(
+    r"(?<![0-9])(?:50|60|70|80|90)['’]?s(?![0-9])"
+    r"|(?:50|60|70|80|90)er(?![a-z])"
+    r"|de (?:50|60|70|80|90)(?:\s|$|-|a)"
+)
+
+
 def clean_name(name: str) -> str:
     n = norm_text(name)
     n = re.sub(r"^[\-\|\*\s]+|[\-\|\*\s]+$", "", n)
@@ -196,25 +344,28 @@ def clean_name(name: str) -> str:
 
 
 def classify(rec: dict) -> str:
-    hay = " ".join([
+    hay = fold_match_text(" ".join([
         rec.get("name", ""), rec.get("tags", ""), rec.get("icy_genre", ""),
-    ]).lower()
-    hay = hay.replace("_", " ").replace("/", " ").replace(",", " ")
-    if not hay.strip():
-        return "varied"
+    ]))
     scores: dict[str, float] = {}
-    for key, _zh, _en, kws in GENRES:
-        sc = 0.0
-        for kw in kws:
-            if kw in hay:
-                sc += 1.0 + min(len(kw), 14) / 14.0
-        for kw in STRONG.get(key, []):
-            if kw in hay:
-                sc += 3.0
-        if sc:
-            scores[key] = sc
+    if hay:
+        for key, specs, strong_specs in _GENRE_MATCHERS:
+            sc = 0.0
+            for spec in specs:
+                if _spec_hits(spec, hay):
+                    sc += 1.0 + min(spec[2], 14) / 14.0
+            for spec in strong_specs:
+                if _spec_hits(spec, hay):
+                    sc += 3.0
+            if sc:
+                scores[key] = sc
+        for key, rx in _COMPOUND_TAILS:
+            if rx.search(hay):
+                scores[key] = scores.get(key, 0.0) + 1.5
+        if _OLDIES_DECADE.search(hay):
+            scores["oldies"] = scores.get("oldies", 0.0) + 2.2
     if not scores:
-        return "varied"
+        return _fallback_genre(rec)
     return max(scores.items(), key=lambda kv: kv[1])[0]
 
 
@@ -445,6 +596,8 @@ def genres_meta(stations: list[dict]) -> list[dict]:
 
 GENRE_ZH = {key: zh for key, zh, _en, _kws in GENRES}
 GENRE_ZH["varied"] = "综合电台"
+GENRE_EN = {key: en for key, _zh, en, _kws in GENRES}
+GENRE_EN["varied"] = "VARIED"
 
 GENRE_CHOICES = [(key, zh) for key, zh, _en, _kws in GENRES] + [("varied", "综合电台")]
 

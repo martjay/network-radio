@@ -244,8 +244,11 @@ def _chevron_right(p: QPainter) -> None:
 
 
 def _close(p: QPainter) -> None:
-    p.drawLine(QPointF(6.5, 6.5), QPointF(17.5, 17.5))
-    p.drawLine(QPointF(17.5, 6.5), QPointF(6.5, 17.5))
+    pen = QPen(p.pen())
+    pen.setWidthF(2.35)
+    p.setPen(pen)
+    p.drawLine(QPointF(6.2, 6.2), QPointF(17.8, 17.8))
+    p.drawLine(QPointF(17.8, 6.2), QPointF(6.2, 17.8))
 
 
 def _minimize(p: QPainter) -> None:
@@ -404,6 +407,16 @@ def _chev_last(p: QPainter) -> None:
     p.drawPolyline(_poly((6.8, 6.2), (12.6, 12.0), (6.8, 17.8)))
 
 
+def _locate(p: QPainter) -> None:
+    """Crosshair: jump the list to whatever is playing."""
+    p.drawEllipse(QPointF(12.0, 12.0), 6.4, 6.4)
+    p.drawEllipse(QPointF(12.0, 12.0), 2.0, 2.0)
+    p.drawLine(QPointF(12.0, 2.8), QPointF(12.0, 6.4))
+    p.drawLine(QPointF(12.0, 17.6), QPointF(12.0, 21.2))
+    p.drawLine(QPointF(2.8, 12.0), QPointF(6.4, 12.0))
+    p.drawLine(QPointF(17.6, 12.0), QPointF(21.2, 12.0))
+
+
 def _sleep(p: QPainter) -> None:
     p.drawArc(QRectF(4.5, 4.5, 15.0, 15.0), 90 * 16, 180 * 16)
     p.drawArc(QRectF(7.0, 4.5, 12.5, 15.0), 90 * 16, 180 * 16)
@@ -459,6 +472,7 @@ DRAW = {
     "edit": _edit,
     "external": _external,
     "sleep": _sleep,
+    "locate": _locate,
     "chev_left": _chev_left,
     "chev_right": _chev_right,
     "chev_first": _chev_first,

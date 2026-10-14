@@ -13,10 +13,12 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QFontMetrics, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
-    QAbstractItemView, QHeaderView, QStyle, QStyledItemDelegate, QTreeView,
+    QAbstractItemView, QApplication, QHeaderView, QStyle, QStyledItemDelegate,
+    QTreeView,
 )
 
 from . import icons, theme
+from .widgets import show_copy_tip
 from .taxonomy import GENRE_ZH
 
 STATION_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -381,6 +383,13 @@ class StationTable(QTreeView):
             return
         if index.column() == COL_FAV:
             self.favorite_toggled.emit(station.get("url", ""))
+            return
+        mods = QApplication.keyboardModifiers()
+        if (index.column() == COL_NAME
+                and mods & Qt.KeyboardModifier.ControlModifier
+                and (station.get("name") or "").strip()):
+            QApplication.clipboard().setText(station.get("name") or "")
+            show_copy_tip(self)
             return
         self.station_activated.emit(station)
 
